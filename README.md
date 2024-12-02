@@ -8,7 +8,7 @@
 
 
 ## Installation
-Clone this repo with `git clone --recursive https://github.com/kerrj/rsrd`, which will clone submodules into `dependencies/`
+Clone this repo with `git clone --recursive https://github.com/uynitsuj/rsrd`, which will clone submodules into `dependencies/`
 ### Outside Dependencies
 First please install PyTorch 2.1.2 in a python 3.10 conda env with cuda version 12.0 (should also work with different torch versions but this is what we've tested). Next, install [nerfstudio](https://github.com/nerfstudio-project/nerfstudio) and [gsplat](https://github.com/nerfstudio-project/gsplat) using the instructions provided in their documentation. We use `nerfstudio` version 1.1.4 and `gsplat` version 1.4.0.
 
