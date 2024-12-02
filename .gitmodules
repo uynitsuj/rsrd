@@ -10,6 +10,7 @@
 [submodule "dependencies/jaxmp"]
 	path = dependencies/jaxmp
 	url = git@github.com:chungmin99/jaxmp.git
+	branch = d7124b3
 [submodule "jaxls"]
 	path = jaxls
 	url = git@github.com:chungmin99/jaxls.git
