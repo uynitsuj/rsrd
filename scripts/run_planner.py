@@ -29,7 +29,7 @@ import tyro
 from loguru import logger
 
 from nerfstudio.utils.eval_utils import eval_setup
-from jaxmp.extras import load_urdf
+from jaxmp.extras.urdf_loader import load_urdf
 from jaxmp.coll import Convex
 
 from rsrd.extras.cam_helpers import get_ns_camera_at_origin
