@@ -20,3 +20,6 @@
 [submodule "dependencies/garfield"]
 	path = dependencies/garfield
 	url = https://github.com/chungmin99/garfield
+[submodule "dependencies/hamer"]
+	path = dependencies/hamer
+	url = https://github.com/geopavlakos/hamer.git

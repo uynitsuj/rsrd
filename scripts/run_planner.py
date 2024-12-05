@@ -14,7 +14,7 @@ from threading import Lock
 import jaxlie
 import time
 from pathlib import Path
-import moviepy.editor as mpy
+import moviepy as mpy
 
 import cv2
 import numpy as onp
