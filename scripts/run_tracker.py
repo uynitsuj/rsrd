@@ -7,7 +7,8 @@ from typing import Optional, cast
 import time
 from pathlib import Path
 from threading import Lock
-import moviepy.editor as mpy
+# import moviepy.editor as mpy
+import moviepy as mpy
 import plotly.express as px
 
 import cv2

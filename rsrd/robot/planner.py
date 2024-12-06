@@ -252,7 +252,14 @@ class PartMotionPlanner:
         coll_dist = jnp.zeros((*joints.shape[:-1], len(robot_coll), len(part_coll)))
         for i in range(len(robot_coll)):
             for j in range(len(part_coll)):
-                dist = collide(robot_coll[i], part_coll[j]).dist
+                # try:
+                    # dist = collide(robot_coll[i], part_coll[j]).dist
+                dist = collide(robot_coll[i].reshape(-1, 1), part_coll[j].reshape(1, -1)).dist 
+                dist = dist.reshape((-1,))
+                # except Exception as exc:
+                #     print(exc)
+                #     print(f"Failed to collide {i} and {j}")
+                #     breakpoint()
                 coll_dist = coll_dist.at[..., i, j].set(dist)
 
         coll_dist = coll_dist.min(axis=-1)  # [num_joints, num_robot_links]

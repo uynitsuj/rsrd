@@ -34,7 +34,7 @@ from jaxmp.coll import Convex
 
 from rsrd.extras.cam_helpers import get_ns_camera_at_origin
 from rsrd.robot.motion_plan_yumi import YUMI_REST_POSE
-from rsrd.extras.zed import Zed
+# from rsrd.extras.zed import Zed
 from rsrd.motion.motion_optimizer import (
     RigidGroupOptimizer,
     RigidGroupOptimizerConfig,
@@ -167,6 +167,19 @@ def main(
         traj_list_handler.disabled = False
         move_obj_handler.disabled = False
 
+    def gen_traj():
+        nonlocal list_traj
+        assert traj_generator is not None
+        generate_traj_handler.disabled = True
+        move_obj_handler.disabled = True
+        with traj_gen_lock:
+            list_traj = next(traj_generator)
+        generate_traj_handler.disabled = False
+        traj_list_handler.max = list_traj.shape[0] - 1
+        traj_list_handler.value = 0
+        traj_list_handler.disabled = False
+        move_obj_handler.disabled = False
+
     while True:
         if play_checkbox.value:
             track_slider.value = (track_slider.value + 1) % timesteps
@@ -180,6 +193,7 @@ def main(
         viser_urdf.update_cfg(onp.array(traj[tstep]))
 
         time.sleep(0.05)
+        # breakpoint()
 
 
 def get_optimizer(
