@@ -6,7 +6,7 @@
 	url = https://github.com/kerrj/RAFT-Stereo.git
 [submodule "dependencies/dig"]
 	path = dependencies/dig
-	url = https://github.com/kerrj/dig
+	url = https://github.com/uynitsuj/dig
 [submodule "dependencies/jaxmp"]
 	path = dependencies/jaxmp
 	url = https://github.com/chungmin99/jaxmp.git
@@ -23,3 +23,4 @@
 [submodule "dependencies/hamer"]
 	path = dependencies/hamer
 	url = https://github.com/geopavlakos/hamer.git
+
