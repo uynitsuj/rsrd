@@ -11,7 +11,7 @@ from loguru import logger
 import trimesh
 import yourdfpy
 
-from jaxmp import JaxKinTree
+from jaxmp import JaxKinTree, RobotFactors
 from jaxmp.coll import RobotColl, collide, Convex
 from jaxmp.extras.solve_ik import solve_ik
 
@@ -20,7 +20,7 @@ from rsrd.robot.graspable_obj import GraspableObject
 from rsrd.robot.motion_plan_yumi import YUMI_REST_POSE
 from rsrd.robot.motion_plan_yumi import motion_plan_yumi
 
-solve_ik_vmap = jax.vmap(solve_ik, in_axes=(None, 0, None, None))
+solve_ik_vmap = jax.vmap(solve_ik, in_axes=(None, 0, None, None, None, None))
 mp_yumi_vmap = jax.vmap(motion_plan_yumi, in_axes=(None, None, 0))
 
 
@@ -36,6 +36,9 @@ class PartMotionPlanner:
     right_joint_idx: int
     ee_indices: jnp.ndarray
 
+    pos_weight: float = 5.0,
+    rot_weight: float = 1.0,
+
     def __init__(
         self,
         optimizer: RigidGroupOptimizer,
@@ -45,20 +48,23 @@ class PartMotionPlanner:
         self.optimizer = optimizer
         self.urdf = urdf
         self.kin = JaxKinTree.from_urdf(self.urdf)
+        
+        self.rest_pose = (self.kin.limits_upper + self.kin.limits_lower) / 2
+        self.JointVar = RobotFactors.get_var_class(self.kin, self.rest_pose)
 
         # The convex bodies tend to be an _underestimate_ due to the decimation process.
         # To counter this, we inflate the meshes a bit.
-        def coll_handler(meshes: Sequence[trimesh.Trimesh]) -> Sequence[Convex]:
-            _meshes = []
-            for mesh in meshes:
-                mesh.vertices += 0.01 * mesh.vertex_normals
-                _meshes.append(mesh)
-            return [Convex.from_mesh(mesh) for mesh in _meshes]
+        # def coll_handler(meshes: Sequence[trimesh.Trimesh]) -> Sequence[Convex]:
+        #     _meshes = []
+        #     for mesh in meshes:
+        #         mesh.vertices += 0.01 * mesh.vertex_normals
+        #         _meshes.append(mesh)
+        #     return [Convex.from_mesh(mesh) for mesh in _meshes]
 
         # Allow "collisions" within an arm. This is hardcoded for the yumi.
         from rsrd.robot.yumi_coll_mat import self_coll_ignore_pairs
         self.robot_coll = RobotColl.from_urdf(
-            self.urdf, coll_handler=coll_handler, self_coll_ignore=self_coll_ignore_pairs
+            self.urdf, self_coll_ignore=self_coll_ignore_pairs
         )
         self.object = GraspableObject(self.optimizer)
 
@@ -223,11 +229,19 @@ class PartMotionPlanner:
         T_grasp_world = self.object.get_T_grasps_world(
             part_index, jnp.array([0]), T_obj_world
         )
+        
+        ik_weight = jnp.array([self.pos_weight] * 3 + [self.rot_weight] * 3)
+        ik_weight = ik_weight * jnp.array([True for _ in range(6)]).astype(
+            jnp.float32
+        )
+        
         _, joints = solve_ik_vmap(
             self.kin,
             T_grasp_world,
             jnp.array([joint_idx]),
             jnp.array(YUMI_REST_POSE),
+            self.JointVar,
+            ik_weight
         )
 
         # Check that the IK actually goes to the correct place.
@@ -248,7 +262,7 @@ class PartMotionPlanner:
             )
             for idx in range(len(self.object.parts))
         ]
-
+        import pdb; pdb.set_trace()
         coll_dist = jnp.zeros((*joints.shape[:-1], len(robot_coll), len(part_coll)))
         for i in range(len(robot_coll)):
             for j in range(len(part_coll)):

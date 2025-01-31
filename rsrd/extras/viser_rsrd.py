@@ -64,6 +64,8 @@ class ViserRSRD:
     def _create_frames_and_gaussians(self, group_idx: int, frame_name: str):
         dig_model = self.optimizer.dig_model
         group_mask = self.optimizer.group_masks[group_idx].detach().cpu()
+        
+        # import pdb; pdb.set_trace()
 
         Rs = vtf.SO3(dig_model.quats[group_mask].cpu().numpy()).as_matrix()
         covariances = np.einsum(
@@ -87,7 +89,8 @@ class ViserRSRD:
         rgbs = (
             torch.clamp(dig_model.colors, 0.0, 1.0).detach()[group_mask].cpu().numpy()
         )
-        opacities = dig_model.opacities.sigmoid()[group_mask].detach().cpu().numpy()
+        opacities = torch.sigmoid(dig_model.opacities[group_mask]).detach().cpu().numpy()
+        # opacities = np.ones((rgbs.shape[0], 1))
 
         # Add the frame to the scene. Convention is xyz_wxyz.
         p2o_7vec = self.optimizer.init_p2o[group_idx].cpu().numpy()

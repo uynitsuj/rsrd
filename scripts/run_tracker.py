@@ -3,7 +3,7 @@ Script for running the tracker.
 """
 
 import json
-from typing import Optional, cast
+from typing import Optional, cast, Literal
 import time
 from pathlib import Path
 from threading import Lock
@@ -16,6 +16,7 @@ import numpy as np
 import torch
 import tqdm
 import warp as wp
+import trimesh
 
 import viser
 import tyro
@@ -38,19 +39,26 @@ from rsrd.extras.cam_helpers import (
     get_ns_camera_at_origin,
     get_vid_frame,
 )
+from rsrd.robot.graspable_obj import GraspableObject
 from rsrd.extras.viser_rsrd import ViserRSRD
 
 torch.set_float32_matmul_precision("high")
 
+#Temp
+import jax.numpy as jnp
+from jaxtyping import Float
+import jax_dataclasses as jdc
+import jaxlie
 
 def main(
     output_dir: Path,
     is_obj_jointed: Optional[bool] = None,
     dig_config_path: Optional[Path] = None,
     video_path: Optional[Path] = None,
+    hand_mode: Literal["single", "bimanual"] = "bimanual",
     camera_intr_type: CameraIntr = IPhoneIntr(),
     save_hand: bool = True,
-):
+    ):
     """Track objects in video using RSRD.
 
     If a `cache_info.json` file is found in the output directory,
@@ -181,11 +189,50 @@ def main(
     timesteps = len(optimizer.part_deltas)
     track_slider = server.gui.add_slider("timestep", 0, timesteps - 1, 1, 0)
     play_checkbox = server.gui.add_checkbox("play", True)
-    show_overlay_checkbox = server.gui.add_checkbox("Show Demo Vid (slow)", False)
-    
-    video_handle = server.gui.add_plotly(px.imshow(np.zeros((1, 1, 3))), aspect)
-    overlay_handle = server.gui.add_plotly(px.imshow(np.zeros((1, 1, 3))), aspect)
 
+    logger.info("Performing analytical grasp sampling & scoring via finger proximity...")
+    
+    def sample_grasps(optimizer):
+        obj = GraspableObject(optimizer)
+        
+        if hand_mode == "bimanual":
+            parts_moved_by_hand = obj.rank_parts_to_move_bimanual()[0] # Returns tuple with (left_idx, right_idx)
+        elif hand_mode == "single":
+            raise NotImplementedError("Single hand mode not implemented yet.")
+        
+        _, new_grasps = obj.rank_grasps_from_hands()
+        
+        for i, part in enumerate(obj.parts):
+            server.scene.add_mesh_trimesh(
+                f"/object/group_{i}/delta/mesh_{i}",
+                part.mesh,
+                scale = optimizer.dataset_scale,
+            )
+            if i in parts_moved_by_hand:
+                server.scene.add_mesh_trimesh(
+                    f"/object/group_{i}/delta/grasps/mesh",
+                    new_grasps[i].to_trimesh(axes_radius=0.001, axes_height=0.05),
+                    scale = optimizer.dataset_scale,
+                )
+
+                top_grasp = new_grasps[i].finger_prox_scores.argmax().item() # Find and plot the top grasp from finger proximity scores
+                transform = np.eye(4)
+                rotation = trimesh.transformations.rotation_matrix(np.pi / 2, [0, 1, 0])
+                transform[:3, :3] = rotation[:3, :3]
+                mesh = trimesh.creation.cylinder(
+                    radius=0.001, height=0.05, transform=transform
+                )
+                grasp_tf = new_grasps[i].to_se3(along_axis='x').as_matrix()[top_grasp]
+                mesh.apply_transform(grasp_tf)
+                mesh.visual.vertex_colors = np.array([150, 150, 255, 255])
+                server.scene.add_mesh_trimesh(
+                    f"/object/group_{i}/delta/top_grasp/mesh",
+                    mesh,
+                    scale = optimizer.dataset_scale,
+                )
+    
+    sample_grasps(optimizer)
+    
     while True:
         if play_checkbox.value:
             track_slider.value = (track_slider.value + 1) % timesteps
@@ -203,29 +250,6 @@ def main(
             wxyz=T_cam_obj.rotation().wxyz.detach().cpu().numpy().squeeze(),
             image = vid_frame
         )
-        if show_overlay_checkbox.value:
-            video_handle.visible = True
-            overlay_handle.visible = True
-            fig = px.imshow(vid_frame)
-            fig.update_layout(
-                margin=dict(l=0, r=0, t=0, b=0),
-                xaxis=dict(visible=False),
-                yaxis=dict(visible=False),
-            )
-            video_handle.figure = fig
-
-            fig = px.imshow(vid_frame)
-            fig.update_layout(
-                margin=dict(l=0, r=0, t=0, b=0),
-                xaxis=dict(visible=False),
-                yaxis=dict(visible=False),
-            )
-            overlay_handle.figure = fig
-        else:
-            video_handle.visible = False
-            overlay_handle.visible = False
-            time.sleep(1/30)
-
 
 def render_video(
     optimizer: RigidGroupOptimizer,

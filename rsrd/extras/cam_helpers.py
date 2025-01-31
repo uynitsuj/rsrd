@@ -130,4 +130,6 @@ def get_vid_frame(
         raise ValueError(f"Failed to read frame at {timestamp} s, or frame {frame_idx}.")
 
     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    # import pdb; pdb.set_trace()
+    frame = cv2.resize(frame, (1280, 720), interpolation=cv2.INTER_LINEAR)
     return frame
