@@ -163,6 +163,85 @@ class GraspableObject:
             
         return sum_part_dist_left, sum_part_dist_right
 
+    def rank_grasps_from_hands(self):
+        """Rank grasps based on proximity to observed hand positions across timesteps.
+        
+        For each part's set of grasps, compute distances between grasp centers and 
+        hand keypoints (index and thumb) across timesteps.
+        """
+        assert self.optimizer.hands_info is not None
+        num_timesteps = len(self.optimizer.hands_info)
+        
+        all_part_rankings = []
+        updated_grasps = []
+        
+        for part_idx, part in enumerate(self.parts):
+            num_grasps = len(part._grasps)
+            sum_grasp_center_dist_left = onp.zeros((num_timesteps, num_grasps))
+            sum_grasp_center_dist_right = onp.zeros((num_timesteps, num_grasps))
+            
+            for idx, (tstep, (l_hand, r_hand)) in enumerate(self.optimizer.hands_info.items()):
+                # Transform grasp centers by current part pose
+                delta = self.optimizer.part_deltas[tstep, part_idx]
+                
+                # Transform grasp centers to current timestep
+                grasp_centers = onp.array(part._grasps.centers) * self.optimizer.dataset_scale
+                grasp_centers = (
+                    jaxlie.SE3(jnp.array(self.optimizer.init_p2o[part_idx].cpu()))
+                    @ jaxlie.SE3(jnp.array(delta.detach().cpu().numpy()))
+                    @ jnp.array(grasp_centers)
+                )
+
+                if l_hand is None:
+                    l_hand = {"keypoints_3d": onp.zeros((0,))}
+                if r_hand is None:
+                    r_hand = {"keypoints_3d": onp.zeros((0,))}
+
+                # Compute distances for left hand
+                for hand_idx in range(l_hand["keypoints_3d"].shape[0]):
+                    pointer = l_hand["keypoints_3d"][hand_idx, MANO_KEYPOINTS["index"]]
+                    thumb = l_hand["keypoints_3d"][hand_idx, MANO_KEYPOINTS["thumb"]]
+                    
+                    # Compute distances to each grasp center
+                    for grasp_idx in range(num_grasps):
+                        grasp_center = grasp_centers[grasp_idx]
+                        d_pointer = jnp.linalg.norm(pointer - grasp_center).item()
+                        d_thumb = jnp.linalg.norm(thumb - grasp_center).item()
+                        sum_grasp_center_dist_left[idx, grasp_idx] += (d_pointer + d_thumb) / 2
+
+                # Compute distances for right hand
+                for hand_idx in range(r_hand["keypoints_3d"].shape[0]):
+                    pointer = r_hand["keypoints_3d"][hand_idx, MANO_KEYPOINTS["index"]]
+                    thumb = r_hand["keypoints_3d"][hand_idx, MANO_KEYPOINTS["thumb"]]
+                    
+                    # Compute distances to each grasp center
+                    for grasp_idx in range(num_grasps):
+                        grasp_center = grasp_centers[grasp_idx]
+                        d_pointer = jnp.linalg.norm(pointer - grasp_center).item()
+                        d_thumb = jnp.linalg.norm(thumb - grasp_center).item()
+                        sum_grasp_center_dist_right[idx, grasp_idx] += (d_pointer + d_thumb) / 2
+            
+            total_grasp_scores = sum_grasp_center_dist_left.sum(axis=0) + sum_grasp_center_dist_right.sum(axis=0)
+
+            # Convert distances to scores (lower distances = better scores)
+            # Normalize to [0, 1] range where 1 is best
+            max_dist = max(total_grasp_scores.max(), 1e-6)  # Avoid division by zero
+            min_dist = total_grasp_scores.min()  # Avoid division by zero
+
+            normalized_scores = 1.0 - ((total_grasp_scores - min_dist) / (max_dist - min_dist))
+            
+            new_grasps = AntipodalGrasps(
+            centers=part._grasps.centers,
+            axes=part._grasps.axes,
+            finger_prox_scores=jnp.array(normalized_scores)
+            )
+            updated_grasps.append(new_grasps)
+            
+            grasp_rankings = onp.argsort(-normalized_scores)
+            
+            all_part_rankings.append(grasp_rankings.tolist())
+        
+        return all_part_rankings, updated_grasps
 
 @jdc.pytree_dataclass
 class GraspablePart:
@@ -170,7 +249,7 @@ class GraspablePart:
     _grasps: AntipodalGrasps
 
     @staticmethod
-    def from_mesh(mesh: trimesh.Trimesh, max_width: float, max_grasps: int = 10) -> GraspablePart:
+    def from_mesh(mesh: trimesh.Trimesh, max_width: float, max_grasps: int = 20) -> GraspablePart:
         grasps = AntipodalGrasps.from_sample_mesh(mesh, max_samples=1000, max_width=max_width)
         grasps = jax.tree.map(lambda x: x[:max_grasps], grasps)
 

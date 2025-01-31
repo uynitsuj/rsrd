@@ -556,7 +556,6 @@ class RigidGroupOptimizer:
         data = json.loads(path.read_text())
         self.part_deltas = torch.nn.Parameter(torch.tensor(data["part_deltas"]).cuda())
         self.T_objreg_objinit = torch.tensor(data["T_objreg_objinit"]).cuda()
-        
         # Load hand info, if available.
         if "hands" in data:
             self.hands_info = {}

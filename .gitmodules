@@ -6,14 +6,10 @@
 	url = https://github.com/kerrj/RAFT-Stereo.git
 [submodule "dependencies/dig"]
 	path = dependencies/dig
-	url = https://github.com/uynitsuj/dig
+	url = https://github.com/uynitsuj/dig.git
 [submodule "dependencies/jaxmp"]
 	path = dependencies/jaxmp
-	url = https://github.com/chungmin99/jaxmp.git
-	branch = d7124b3
-[submodule "jaxls"]
-	path = jaxls
-	url = https://github.com/chungmin99/jaxls.git
+	url = https://github.com/uynitsuj/jaxmp.git
 [submodule "dependencies/jaxls"]
 	path = dependencies/jaxls
 	url = https://github.com/chungmin99/jaxls.git
