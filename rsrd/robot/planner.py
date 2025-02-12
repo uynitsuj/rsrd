@@ -342,3 +342,4 @@ class PartMotionPlanner:
         ] * (start_joints[None, :] - jnp.array(joints)[None, :])
 
         return jnp.concatenate([traj_rest_approach, traj_approach_start], axis=0)
+

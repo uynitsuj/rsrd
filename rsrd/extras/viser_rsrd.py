@@ -9,6 +9,8 @@ import viser.transforms as vtf
 import trimesh
 from rsrd.motion.motion_optimizer import RigidGroupOptimizer
 from rsrd.util.common import MANO_KEYPOINTS
+from dig.dig_pipeline import ObjectMode
+import rsrd.transforms as tf
 
 
 class ViserRSRD:
@@ -65,8 +67,6 @@ class ViserRSRD:
         dig_model = self.optimizer.dig_model
         group_mask = self.optimizer.group_masks[group_idx].detach().cpu()
         
-        # import pdb; pdb.set_trace()
-
         Rs = vtf.SO3(dig_model.quats[group_mask].cpu().numpy()).as_matrix()
         covariances = np.einsum(
             "nij,njk,nlk->nil",
@@ -93,7 +93,11 @@ class ViserRSRD:
         # opacities = np.ones((rgbs.shape[0], 1))
 
         # Add the frame to the scene. Convention is xyz_wxyz.
-        p2o_7vec = self.optimizer.init_p2o[group_idx].cpu().numpy()
+        if self.optimizer.object_mode == ObjectMode.ARTICULATED:
+            p2o_7vec = self.optimizer.init_p2o[group_idx].cpu().numpy()
+        elif self.optimizer.object_mode == ObjectMode.RIGID_OBJECTS:
+            p2o_7vec = (tf.SE3(wxyz_xyz = self.optimizer.T_objreg_objinit[0]).inverse() @ tf.SE3(wxyz_xyz = self.optimizer.T_world_objinit[group_idx]) @ tf.SE3(wxyz_xyz = self.optimizer.T_objreg_objinit[group_idx])).wxyz_xyz.cpu().numpy()
+        
         self.part_frames.append(
             self._server.scene.add_frame(
                 frame_name,
