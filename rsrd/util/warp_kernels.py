@@ -68,6 +68,85 @@ def apply_to_model_warp(
     quats_out[tid, 2] = new_quat[1]  # y
     quats_out[tid, 3] = new_quat[2]  # z
 
+@wp.kernel
+def apply_to_model_warp_multi_object(
+    init_o2w: wp.array(dtype=float, ndim=2),
+    init_p2o: wp.array(dtype=float, ndim=2),
+    obj_deltas: wp.array(dtype=float, ndim=2),
+    part_deltas: wp.array(dtype=float, ndim=2),
+    part_labels: wp.array(dtype=int),
+    obj_labels: wp.array(dtype=int),
+    means: wp.array(dtype=wp.vec3),
+    quats: wp.array(dtype=float, ndim=2),
+    # outputs
+    means_out: wp.array(dtype=wp.vec3),
+    quats_out: wp.array(dtype=float, ndim=2),
+):
+    """
+    Kernel for applying hierarchical transforms to gaussian splats in a multi-object scene
+    with articulated objects (objects with multiple movable parts).
+
+    Transform hierarchy: Gaussian -> Part -> Object -> World
+
+    Parameters:
+    -----------
+    init_o2w: Mx7 tensor
+        Initial object-to-world poses for M objects. Each pose is a 7D vector [x,y,z, qx,qy,qz,qw]
+    init_p2o: Px7 tensor
+        Initial part-to-object poses for P parts across all objects. Each pose is a 7D vector
+    obj_deltas: Mx7 tensor
+        Object pose deltas (objnew_to_objoriginal) for each of the M objects
+    part_deltas: Px7 tensor
+        Part pose deltas (partnew_to_partoriginal) for each of the P parts
+    part_labels: N tensor
+        Labels mapping each Gaussian to its corresponding part (0->P-1)
+    obj_labels: N tensor
+        Labels mapping each Gaussian to its corresponding object (0->M-1)
+    means: Nx3 tensor
+        Gaussian means in world space
+    quats: Nx4 tensor
+        Gaussian orientations as quaternions (wxyz)
+    
+    Outputs:
+    --------
+    means_out: Nx3 tensor
+        Transformed Gaussian means
+    quats_out: Nx4 tensor
+        Transformed Gaussian orientations (wxyz)
+
+    Transform Chain:
+    --------------
+    1. Gaussian to Part: g2p_T = inv(p2o_T) * inv(o2w_T) * g2w_T
+    2. Apply Deltas: new_g2w_T = o2w_T * obj_delta_T * p2o_T * part_delta_T * g2p_T
+    """
+    tid = wp.tid()
+    part_id = part_labels[tid]  # Which part this Gaussian belongs to
+    obj_id = obj_labels[tid]   # Which object this Gaussian belongs to
+    
+    # Get the initial transforms
+    o2w_T = poses_7vec_to_transform(init_o2w, obj_id)      # Object -> World
+    p2o_T = poses_7vec_to_transform(init_p2o, part_id)     # Part -> Object
+    
+    # Get the delta transforms
+    obj_delta_T = poses_7vec_to_transform(obj_deltas, obj_id)    # Object motion
+    part_delta_T = poses_7vec_to_transform(part_deltas, part_id) # Sub-Part motion
+    
+    # Current Gaussian pose in world space
+    g2w_T = wp.transformation(
+        means[tid],
+        wp.quaternion(quats[tid, 1], quats[tid, 2], quats[tid, 3], quats[tid, 0]),
+    )
+    
+    g2p_T = wp.transform_inverse(p2o_T) * wp.transform_inverse(o2w_T) * g2w_T
+
+    new_g2w_T = o2w_T * obj_delta_T * p2o_T * part_delta_T * g2p_T
+    
+    means_out[tid] = wp.transform_get_translation(new_g2w_T)
+    new_quat = wp.transform_get_rotation(new_g2w_T)
+    quats_out[tid, 0] = new_quat[3]  # w
+    quats_out[tid, 1] = new_quat[0]  # x
+    quats_out[tid, 2] = new_quat[1]  # y
+    quats_out[tid, 3] = new_quat[2]  # z
 
 @wp.kernel
 def traj_smoothness_loss_warp(

@@ -25,12 +25,13 @@ from nerfstudio.model_components.losses import depth_ranking_loss
 from nerfstudio.pipelines.base_pipeline import Pipeline
 
 from dig.dig import DiGModel
+from dig.dig_pipeline import ObjectMode
 from dig.data.utils.dino_dataloader import DinoDataloader
 
 import rsrd.transforms as tf
 from rsrd.motion.atap_loss import ATAPLoss, ATAPConfig
 from rsrd.motion.observation import PosedObservation, VideoSequence, Frame
-from rsrd.util.warp_kernels import apply_to_model_warp, traj_smoothness_loss_warp
+from rsrd.util.warp_kernels import apply_to_model_warp, traj_smoothness_loss_warp, apply_to_model_warp_multi_object
 from rsrd.util.common import identity_7vec, extrapolate_poses, mnn_matcher
 
 try:
@@ -56,8 +57,8 @@ class RigidGroupOptimizerConfig:
     rgb_loss_weight: float = 0.05
     part_still_weight: float = 0.01
 
-    approx_dist_to_obj: float = 0.4  # in meters
-    altitude_down: float = np.pi / 4  # in radians
+    approx_dist_to_obj: float = 0.5  # in meters
+    altitude_down: float = np.pi / 6  # in radians
 
 class RigidGroupOptimizer:
     dig_model: DiGModel
@@ -119,6 +120,10 @@ class RigidGroupOptimizer:
             labels = torch.zeros(pipeline.model.num_points).int().cuda()
         else:
             labels = pipeline.cluster_labels.int().cuda()
+            
+        assert hasattr(pipeline, "object_mode")
+        self.object_mode = pipeline.object_mode
+        self.fixed_object_ids = pipeline.fixed_obj_ids
         self.configure_from_clusters(labels)
 
         self.sequence = VideoSequence()
@@ -149,16 +154,25 @@ class RigidGroupOptimizer:
         part_deltas = torch.zeros(0, self.num_groups, 7, dtype=torch.float32, device="cuda")
         self.part_deltas = torch.nn.Parameter(part_deltas)
 
-        # Initialize the object pose. Centered at object centroid, and identity rotation.
-        self.T_world_objinit = identity_7vec()
-        self.T_world_objinit[0, 4:] = self.init_means.mean(dim=0).squeeze()
+        if self.object_mode == ObjectMode.ARTICULATED:
+            # Initialize the object pose. Centered at object centroid, and identity rotation.
+            self.T_world_objinit = identity_7vec()
+            self.T_world_objinit[0, 4:] = self.init_means.mean(dim=0).squeeze()
 
-        # Initialize the part poses to identity. Again, wxyz_xyz.
-        # Parts are initialized at the centroid of the part cluster.
-        self.init_p2o = identity_7vec().repeat(self.num_groups, 1)
-        for i, g in enumerate(self.group_masks):
-            gp_centroid = self.init_means[g].mean(dim=0)
-            self.init_p2o[i, 4:] = gp_centroid - self.init_means.mean(dim=0)
+            # Initialize the part poses to identity. Again, wxyz_xyz.
+            # Parts are initialized at the centroid of the part cluster.
+            self.init_p2o = identity_7vec().repeat(self.num_groups, 1)
+            for i, g in enumerate(self.group_masks):
+                gp_centroid = self.init_means[g].mean(dim=0)
+                self.init_p2o[i, 4:] = gp_centroid - self.init_means.mean(dim=0)
+                
+        elif self.object_mode == ObjectMode.RIGID_OBJECTS:
+            self.config.atap_config.use_atap = False # Disable atap for multi-rigid
+            self.T_world_objinit = identity_7vec().repeat(self.num_groups, 1)
+            for i, g in enumerate(self.group_masks):
+                gp_centroid = self.init_means[g].mean(dim=0)
+                self.T_world_objinit[i, 4:] = gp_centroid
+            self.init_p2o = identity_7vec().repeat(self.num_groups, 1)
 
         self.atap = ATAPLoss(
             self.config.atap_config,
@@ -171,8 +185,8 @@ class RigidGroupOptimizer:
     def initialize_obj_pose(
         self,
         first_obs: PosedObservation,
-        niter=200,
-        n_seeds=6,
+        niter=180,
+        n_seeds=8,
         use_depth=False,
         render=False,
     ):
@@ -184,17 +198,37 @@ class RigidGroupOptimizer:
 
         # Initial guess for 3D object location.
         est_dist_to_obj = self.config.approx_dist_to_obj * self.dataset_scale  # scale to nerfstudio world.
+
         xs, ys, est_loc_2d = self._find_object_pixel_location(first_obs)
+        
+        # TODO: Remove debug plot when done devel
+        # import matplotlib.pyplot as plt
+        # plt.imshow(first_obs.frame.rgb.cpu().numpy())
+        # for i in est_loc_2d.shape[0]:
+        #     plt.scatter(est_loc_2d[i][1].cpu().numpy(), est_loc_2d[i][0].cpu().numpy())
+        # plt.savefig("sample_dino2d.png")
+        # import pdb; pdb.set_trace()
+            
         ray = first_obs.frame.camera.generate_rays(0, est_loc_2d)
         est_loc_3d = ray.origins + ray.directions * est_dist_to_obj
 
         # Take `n_seed` rotations around the object centroid, optimize, then pick the best one.
         # Don't use ROI for this step.
         best_pose, best_loss = identity_7vec(), float("inf")
-        obj_centroid = self.dig_model.means.mean(dim=0, keepdim=True)  # 1x3
+        if self.object_mode == ObjectMode.ARTICULATED:
+            obj_centroid = self.dig_model.means.mean(dim=0, keepdim=True)  # 1x3
+        elif self.object_mode == ObjectMode.RIGID_OBJECTS:
+            obj_centroid = self.T_world_objinit.clone()[:, 4:]
+            
         frame_rgb = (first_obs.frame.rgb.cpu().numpy()*255).astype(np.uint8)
         for z_rot in tqdm(np.linspace(0, np.pi * 2, n_seeds), "Trying seeds..."):
-            candidate_pose = torch.zeros(1, 7, dtype=torch.float32, device="cuda")
+            if self.object_mode == ObjectMode.ARTICULATED:
+                candidate_pose = torch.zeros(1, 7, dtype=torch.float32, device="cuda")
+            elif self.object_mode == ObjectMode.RIGID_OBJECTS:
+                # Generate a uniform random z_rot per rigid object
+                z_rot = torch.rand((self.num_groups,)) * 2 * np.pi
+                
+                candidate_pose = torch.zeros(self.num_groups, 7, dtype=torch.float32, device="cuda")
             candidate_pose[:, :4] = (
                 (
                     tf.SO3.from_x_radians(
@@ -209,6 +243,7 @@ class RigidGroupOptimizer:
                 .cuda()
             )
             candidate_pose[:, 4:] = est_loc_3d - obj_centroid
+                            
             loss, final_pose, rend = self._try_opt(
                 candidate_pose, first_obs.frame, niter, use_depth, render=render
             )
@@ -216,22 +251,36 @@ class RigidGroupOptimizer:
             rend = [0.6*r + 0.4*frame_rgb for r in rend]
             renders.extend(rend)
 
+            # TODO: Try per-obj loss to find best poses (otherwise all objects need to converge to optimal init pose on the same seed)
             if loss is not None and loss < best_loss:
                 best_loss = loss
                 best_pose = final_pose
 
         # Extra optimization steps, with the best pose.
         # Use ROI for this step, since we're close to the GT object pose.
+        
         first_obs.compute_and_set_roi(self)
-
-        # Note the lower LR, for this fine-tuning step.
+        
+        # TODO: Remove debug plot when done devel
+        # import matplotlib.pyplot as plt
+        # from rsrd.util.dev_helpers import plot_pca
+        # plt.imshow(first_obs.roi_frame[0].rgb.cpu().numpy())
+        # plt.savefig("obj1.png")
+        # plt.imshow(first_obs.roi_frame[1].rgb.cpu().numpy())
+        # plt.savefig("obj2.png")
+        # plot_pca(first_obs.roi_frame[0].dino_feats, name="obj1_dino_feats")
+        # plot_pca(first_obs.roi_frame[1].dino_feats, name="obj2_dino_feats")
+        # import pdb; pdb.set_trace()
+        
+        # # Note the lower LR, for this fine-tuning step.
         _, best_pose, rend = self._try_opt(
-            best_pose, first_obs.roi_frame, niter, use_depth, lr=0.005, render=render
+            best_pose, first_obs.roi_frame, niter, use_depth = True, lr=0.005, render=render, camera=first_obs.frame.camera
         )
 
-        assert best_pose.shape == (1, 7), best_pose.shape
+        assert best_pose.shape == (self.num_groups, 7), best_pose.shape
         self.T_objreg_objinit = best_pose
         logger.info("Initialized object pose")
+        
         return renders
 
     def fit(self, frame_idxs: List[int], niter=1):
@@ -239,7 +288,21 @@ class RigidGroupOptimizer:
         assert self.T_objreg_objinit is not None, "Must initialize first with the first frame"
         lr_init = self.config.pose_lr
 
-        optimizer = torch.optim.Adam([self.part_deltas], lr=lr_init)
+        # optimizer = torch.optim.Adam([self.part_deltas], lr=lr_init)
+        
+        optimizable_params = []
+        if len(self.fixed_object_ids) > 0:
+            mask = torch.ones(self.num_groups, dtype=torch.bool, device="cuda")
+            for idx in self.fixed_object_ids:
+                mask[idx] = False
+                
+            self.part_deltas.register_hook(lambda grad: grad * mask.view(1, -1, 1))
+            optimizable_params.append(self.part_deltas)
+        else:
+            optimizable_params.append(self.part_deltas)
+
+        optimizer = torch.optim.Adam(optimizable_params, lr=lr_init)
+    
         scheduler = ExponentialDecayScheduler(
             ExponentialDecaySchedulerConfig(
                 lr_final=self.config.pose_lr_final,
@@ -269,10 +332,18 @@ class RigidGroupOptimizer:
                 i = torch.ones(self.part_deltas.shape[0], dtype=torch.bool, device="cuda")
                 i[frame_idxs] = 0
                 self.part_deltas.grad[i] = 0.0
+                
+                if len(self.fixed_object_ids) > 0:
+                    with torch.no_grad():
+                        for idx in self.fixed_object_ids:
+                            self.part_deltas.grad[:, idx] = 0.0
             for frame_idx in frame_idxs:
                 tape = wp.Tape()
                 with tape:
-                    this_obj_delta = self.T_objreg_objinit.view(1, 7)
+                    if self.object_mode == ObjectMode.ARTICULATED:
+                        this_obj_delta = self.T_objreg_objinit.view(1, 7)
+                    elif self.object_mode == ObjectMode.RIGID_OBJECTS:
+                        this_obj_delta = self.T_objreg_objinit.view(self.num_groups, 7)
                     this_part_deltas = self.part_deltas[frame_idx]
                     observation = self.sequence[frame_idx]
                     frame = (
@@ -289,17 +360,22 @@ class RigidGroupOptimizer:
                         self.config.atap_config.use_atap,
                     )
 
-
                 assert loss is not None
                 loss.backward()
                 tape.backward()  # torch, then tape backward, to propagate gradients to warp kernels.
 
                 # tape backward only propagates up to the slice, so we need to call autograd again to continue.
                 assert this_part_deltas.grad is not None
+                
                 torch.autograd.backward(
                     [this_part_deltas],
                     grad_tensors=[this_part_deltas.grad],
                 )
+                if len(self.fixed_object_ids) > 0:
+                    with torch.no_grad():
+                        for idx in self.fixed_object_ids:
+                            this_part_deltas.grad[idx] = 0.0
+                            
             optimizer.step()
             scheduler.step()
 
@@ -319,15 +395,16 @@ class RigidGroupOptimizer:
     def _try_opt(
         self,
         pose: torch.Tensor,
-        frame: Frame,
+        frame: Frame | List[Frame],
         niter: int,
         use_depth: bool,
         lr: float = 0.01,
-        render: bool = False
+        render: bool = False,
+        camera: Optional[Cameras] = None,
     ) -> Tuple[float, torch.Tensor, List[torch.Tensor]]:
         "tries to optimize the pose, returns None if failed, otherwise returns outputs and loss"
         pose = torch.nn.Parameter(pose.detach().clone())
-
+        
         optimizer = torch.optim.Adam([pose], lr=lr)
         scheduler = ExponentialDecayScheduler(
             ExponentialDecaySchedulerConfig(
@@ -353,6 +430,7 @@ class RigidGroupOptimizer:
                     False,
                     False,
                 )
+
             if loss is None:
                 return torch.inf, pose.data.detach(), renders
 
@@ -364,7 +442,11 @@ class RigidGroupOptimizer:
             loss = loss.item()
             if render:
                 with torch.no_grad():
-                    dig_outputs = self.dig_model.get_outputs(frame.camera)
+                    if isinstance(frame, list):
+                        assert camera is not None, "For multi-ROI frames please explicitly provide original camera for full render"
+                        dig_outputs = self.dig_model.get_outputs(camera)
+                    else:
+                        dig_outputs = self.dig_model.get_outputs(frame.camera)
                 assert isinstance(dig_outputs["rgb"], torch.Tensor)
                 renders.append((dig_outputs["rgb"].detach() * 255).int().cpu().numpy())
 
@@ -375,61 +457,65 @@ class RigidGroupOptimizer:
         returns the y,x coord and box size of the object in the video frame, based on the dino features
         and mutual nearest neighbors
         """
-        samps = torch.randint(0, self.dig_model.num_points, (n_gauss,), device="cuda")
-        nn_inputs = self.dig_model.gauss_params["dino_feats"][samps]
-        dino_feats = self.dig_model.nn(nn_inputs)  # NxC
-        downsamp_frame_feats = obs.frame.dino_feats
-        frame_feats = downsamp_frame_feats.reshape(
-            -1, downsamp_frame_feats.shape[-1]
-        )  # (H*W) x C
-        downsamp = 4
-        frame_feats = frame_feats[::downsamp]
-        _, match_ids = mnn_matcher(dino_feats, frame_feats)
-        x, y = (match_ids*downsamp % (obs.frame.camera.width)).float(), (
-            match_ids*downsamp // (obs.frame.camera.width)
-        ).float()
-        return x, y, torch.tensor([y.median().item(), x.median().item()], device="cuda")
+        if self.object_mode == ObjectMode.ARTICULATED:
+            n_gauss = min(n_gauss, self.dig_model.num_points)
+            samps = torch.randint(0, self.dig_model.num_points, (n_gauss,), device="cuda")
+            nn_inputs = self.dig_model.gauss_params["dino_feats"][samps]
+            dino_feats = self.dig_model.nn(nn_inputs)  # NxC
+            downsamp_frame_feats = obs.frame.dino_feats
+            frame_feats = downsamp_frame_feats.reshape(
+                -1, downsamp_frame_feats.shape[-1]
+            )  # (H*W) x C
+            downsamp = 4
+            frame_feats = frame_feats[::downsamp]
+            _, match_ids = mnn_matcher(dino_feats, frame_feats)
+            x, y = (match_ids*downsamp % (obs.frame.camera.width)).float(), (
+                match_ids*downsamp // (obs.frame.camera.width)
+            ).float()
+            return x, y, torch.tensor([y.median().item(), x.median().item()], device="cuda")
+        
+        elif self.object_mode == ObjectMode.RIGID_OBJECTS: # return a list of xs and ys per rigid object
+            xs, ys = [], []
+            for g in self.group_masks:
+                n_gauss = min(n_gauss, g.sum())
+                samps = torch.randint(0, g.sum(), (n_gauss,), device="cuda")
+                nn_inputs = self.dig_model.gauss_params["dino_feats"][g][samps]
+                dino_feats = self.dig_model.nn(nn_inputs)  # NxC
+                downsamp_frame_feats = obs.frame.dino_feats
+                frame_feats = downsamp_frame_feats.reshape(
+                    -1, downsamp_frame_feats.shape[-1]
+                )
+                downsamp = 4
+                frame_feats = frame_feats[::downsamp]
+                _, match_ids = mnn_matcher(dino_feats, frame_feats)
+                x, y = (match_ids*downsamp % (obs.frame.camera.width)).float(), (
+                    match_ids*downsamp // (obs.frame.camera.width)
+                ).float()
+                xs.append(x)
+                ys.append(y)
 
-    def _get_loss(
-        self,
-        frame: Frame,
-        obj_delta: torch.Tensor,
-        part_deltas: torch.Tensor,
-        use_depth: bool,
-        use_rgb: bool,
-        use_atap: bool,
-    ) -> Optional[torch.Tensor]:
-        """
-        Returns a backpropable loss for the given frame.
-        """
-        with self.render_lock:
-            self.dig_model.eval()
-            self.apply_to_model(obj_delta, part_deltas)
-            outputs = cast(
-                dict[str, torch.Tensor],
-                self.dig_model.get_outputs(frame.camera)
-            )
-
+            return None, None, torch.cat([torch.stack([y.median() for y in ys]).unsqueeze(0), torch.stack([x.median() for x in xs]).unsqueeze(0)]).T
+        
+    def _loss_impl(self, frame: Frame, use_depth: bool, use_rgb: bool, use_atap: bool, obj_id: int = None):
+        loss = torch.Tensor([0.0]).cuda()
+        outputs = (cast(
+            dict[str, torch.Tensor],
+            self.dig_model.get_outputs(frame.camera, obj_id=obj_id)
+        ))
         assert "accumulation" in outputs, outputs.keys()
         with torch.no_grad():
             object_mask = outputs["accumulation"] > self.config.mask_threshold
         if not object_mask.any():
-            logger.warning("No object detected in frame")
+            logger.warning(f"Object {obj_id} not detected in frame")
             return None
-
-        loss = torch.Tensor([0.0]).cuda()
-
         dino_loss = self._get_dino_loss(outputs, frame, object_mask)
         loss = loss + dino_loss
-
         if use_depth:
             depth_loss = self._get_depth_loss(outputs, frame, object_mask)
             loss = loss + depth_loss
-
         if use_rgb:
             rgb_loss = 0.05 * (outputs["rgb"] - frame.rgb).abs().mean()
             loss = loss + rgb_loss
-
         if use_atap:
             weights = torch.full(
                 (self.num_groups, self.num_groups),
@@ -439,7 +525,30 @@ class RigidGroupOptimizer:
             )
             atap_loss = self.atap(weights)
             loss = loss + atap_loss
+        return loss
+        
+    def _get_loss(
+        self,
+        frame: Frame | List[Frame],
+        obj_delta: torch.Tensor,
+        part_deltas: torch.Tensor,
+        use_depth: bool,
+        use_rgb: bool,
+        use_atap: bool,
+    ) -> Optional[torch.Tensor]:
+        """
+        Returns a backpropable loss for the given frame.
+        """
 
+        with self.render_lock:
+            self.dig_model.eval()
+            self.apply_to_model(obj_delta, part_deltas)
+            if isinstance(frame, list):
+                loss = torch.Tensor([0.0]).cuda()
+                for obj_id, fr in enumerate(frame):
+                    loss += self._loss_impl(fr, use_depth, use_rgb, use_atap, obj_id=obj_id)
+            else:
+                loss = self._loss_impl(frame, use_depth, use_rgb, use_atap, obj_id=frame.obj_id)
         return loss
 
     def _get_dino_loss(
@@ -456,10 +565,11 @@ class RigidGroupOptimizer:
         dino_feats = torch.where(object_mask, outputs["dino"], blurred_dino_feats)
 
         if frame.hand_mask is not None:
-            loss = (frame.dino_feats - dino_feats)[frame.hand_mask].norm(dim=-1).mean()
+            loss = (frame.dino_feats[frame.hand_mask] - dino_feats[frame.hand_mask]).norm(dim=-1).mean()
         else:
             loss = (frame.dino_feats - dino_feats).norm(dim=-1).mean()
-
+        del dino_feats  # Explicitly delete
+        torch.cuda.empty_cache()
         return loss
 
     def _get_depth_loss(
@@ -520,8 +630,9 @@ class RigidGroupOptimizer:
         new_means = torch.empty_like(
             self.dig_model.gauss_params["means"], requires_grad=True
         )
-        assert obj_delta.shape == (1,7), obj_delta.shape
-        wp.launch(
+        if self.object_mode == ObjectMode.ARTICULATED:
+            assert obj_delta.shape == (1, 7), obj_delta.shape
+            wp.launch(
             kernel=apply_to_model_warp,
             dim=self.dig_model.num_points,
             inputs = [
@@ -534,7 +645,24 @@ class RigidGroupOptimizer:
                 wp.from_torch(self.dig_model.gauss_params["quats"]),
             ],
             outputs=[wp.from_torch(new_means, dtype=wp.vec3), wp.from_torch(new_quats)],
-        )
+            )
+        elif self.object_mode == ObjectMode.RIGID_OBJECTS:
+            assert obj_delta.shape == (self.num_groups,7), obj_delta.shape
+            wp.launch(
+                kernel=apply_to_model_warp_multi_object,
+                dim=self.dig_model.num_points,
+                inputs = [
+                    wp.from_torch(self.T_world_objinit),
+                    wp.from_torch(self.init_p2o),
+                    wp.from_torch(obj_delta),
+                    wp.from_torch(part_deltas),
+                    wp.from_torch(self.group_labels),
+                    wp.from_torch(self.group_labels),
+                    wp.from_torch(self.dig_model.gauss_params["means"], dtype=wp.vec3),
+                    wp.from_torch(self.dig_model.gauss_params["quats"]),
+                ],
+                outputs=[wp.from_torch(new_means, dtype=wp.vec3), wp.from_torch(new_quats)],
+            )
         self.dig_model.gauss_params["quats"] = new_quats
         self.dig_model.gauss_params["means"] = new_means
 
@@ -632,7 +760,7 @@ class RigidGroupOptimizer:
         with torch.no_grad():
             self.dig_model.gauss_params["means"] = self.init_means.detach().clone()
             self.dig_model.gauss_params["quats"] = self.init_quats.detach().clone()
-
+    # @profile
     def add_observation(self, obs: PosedObservation, extrapolate_velocity = True):
         """
         Sets the rgb_frame to optimize the pose for
@@ -674,7 +802,8 @@ class RigidGroupOptimizer:
             dino_fn,
             metric_depth_img=(
                 None if metric_depth is None else torch.from_numpy(metric_depth)
-            )
+            ),
+            precompute_2Dhand_masks=True
         )
         return frame
 
@@ -690,7 +819,7 @@ class RigidGroupOptimizer:
             curr_obs = self.sequence[frame_id]
             outputs = cast(
                 dict[str, torch.Tensor],
-                self.dig_model.get_outputs(curr_obs.frame.camera),
+                self.dig_model.get_outputs(curr_obs.frame.camera, rgb_only=True),
             )
             object_mask = outputs["accumulation"] > self.config.mask_threshold
 
@@ -705,6 +834,11 @@ class RigidGroupOptimizer:
                     continue
 
                 # world ~ camera, since we instantiate camera aligned with the origin.
+                # if len(self.T_objreg_world.wxyz_xyz) > 1:
+                #     objreg_world = tf.SE3(wxyz_xyz = self.T_objreg_world.wxyz_xyz[0]) # For now default to saving hande poses in first object frame
+                # else:
+                #     objreg_world = self.T_objreg_world
+                
                 transform = (
                     self.T_objreg_world
                     .inverse()
@@ -727,4 +861,50 @@ class RigidGroupOptimizer:
     @property
     def T_objreg_world(self):
         assert self.T_objreg_objinit is not None
-        return tf.SE3(self.T_world_objinit) @ tf.SE3(self.T_objreg_objinit)
+        if self.object_mode == ObjectMode.RIGID_OBJECTS:
+            # Always use first object's transform as base frame
+            return tf.SE3(self.T_world_objinit[0:1]) @ tf.SE3(self.T_objreg_objinit[0:1])
+        else:
+            # Original single object case 
+            return tf.SE3(self.T_world_objinit) @ tf.SE3(self.T_objreg_objinit)
+    
+    def detect_motion_phases(self, radius_pos=0.1):
+        """
+        Detects start and end of motion by comparing against initial pose.
+        Assumes three-phase motion: stationary -> moving -> stationary
+        
+        Args:
+            part_deltas: Tensor of shape [num_timesteps, num_parts, 7] (wxyz_xyz format)
+            radius_quat: Quaternion distance threshold from initial pose
+            radius_pos: Position distance threshold from initial pose (in same units as positions)
+            
+        Returns:
+            starts: Tensor of shape [num_parts] containing start frame indices
+            ends: Tensor of shape [num_parts] containing end frame indices
+        """
+        num_timesteps, num_parts, _ = self.part_deltas.shape
+        part_deltas = self.part_deltas.detach().clone()
+        
+        initial_pos = part_deltas[0, :, 4:]   # [num_parts, 3]
+        final_pos = part_deltas[-1, :, 4:]    # [num_parts, 3]
+        
+        pos_dist_to_init = torch.norm(part_deltas[:, :, 4:] - initial_pos, dim=2)                    # [num_timesteps, num_parts]
+        pos_dist_to_final = torch.flip(torch.norm(part_deltas[:, :, 4:] - final_pos, dim=2), [0])    # [num_timesteps, num_parts]
+        
+        starts = torch.zeros(num_parts, dtype=torch.long)
+        ends = torch.zeros(num_parts, dtype=torch.long)
+
+        for part in range(num_parts):
+            move_start = torch.where(pos_dist_to_init[:, part] > radius_pos)[0]
+            move_end = torch.where(pos_dist_to_final[:, part] > radius_pos)[0]
+            
+            if len(move_start) > 0:
+                starts[part] = move_start[0].item()
+                ends[part] = num_timesteps - move_end[0].item()
+            else:
+                starts[part] = 0
+                ends[part] = num_timesteps
+                
+        self.motion_phases = torch.zeros(num_timesteps, num_parts, dtype=torch.bool)
+        for part in range(num_parts):
+            self.motion_phases[starts[part]:ends[part], part] = True
