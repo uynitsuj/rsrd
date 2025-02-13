@@ -50,8 +50,7 @@ from jaxtyping import Float
 import jax_dataclasses as jdc
 import jaxlie
 from torchvision.transforms.functional import resize
-
-
+from PIL import Image
 
 def main(
     output_dir: Path,
@@ -342,18 +341,17 @@ def track_and_save_motion(
     obs = optimizer.create_observation_from_rgb_and_camera(rgb, camera)
 
     # Initialize.
-    renders = optimizer.initialize_obj_pose(obs, render=True, niter=150, n_seeds=8)
-
+    renders, final_frame = optimizer.initialize_obj_pose(obs, render=True, niter=150, n_seeds=8)
+    final_frame_pil = Image.fromarray(final_frame.astype(np.uint8))
+    final_frame_pil.save(str(camopt_render_path).replace('.mp4','_final_opt.png'))
     # Save the frames.
+    
     out_clip = mpy.ImageSequenceClip(renders, fps=30)
     out_clip.write_videofile(str(camopt_render_path), codec="libx264",bitrate='5000k')
     out_clip.write_videofile(str(camopt_render_path).replace('.mp4','_mac_compat.mp4'),codec='mpeg4',bitrate='5000k')
 
     # Add each frame, optimize them separately.
-    # renders = []
-    
-    pre_smooth_dir = frame_opt_path.parent / "pre_smooth_frames"
-    pre_smooth_dir.mkdir(parents=True, exist_ok=True)
+    renders = []
     
     for frame_id in tqdm.trange(0, num_frames):
         try:

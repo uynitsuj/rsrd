@@ -277,11 +277,13 @@ class RigidGroupOptimizer:
             best_pose, first_obs.roi_frame, niter, use_depth = True, lr=0.005, render=render, camera=first_obs.frame.camera
         )
 
+        rend_final_opt_frame = 0.6*rend[-1] + 0.4*frame_rgb
+
         assert best_pose.shape == (self.num_groups, 7), best_pose.shape
         self.T_objreg_objinit = best_pose
         logger.info("Initialized object pose")
         
-        return renders
+        return renders, rend_final_opt_frame
 
     def fit(self, frame_idxs: List[int], niter=1):
         # TODO(cmk) temporarily removed all_frames)
