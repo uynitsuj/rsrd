@@ -57,7 +57,7 @@ class RigidGroupOptimizerConfig:
     rgb_loss_weight: float = 0.05
     part_still_weight: float = 0.01
 
-    approx_dist_to_obj: float = 0.5  # in meters
+    approx_dist_to_obj: float = 0.55  # in meters
     altitude_down: float = np.pi / 6  # in radians
 
 class RigidGroupOptimizer:
@@ -129,7 +129,11 @@ class RigidGroupOptimizer:
         self.sequence = VideoSequence()
         self.T_objreg_objinit = None
         self.hands_info = {}
+        self._track_path = None
 
+    def set_track_path(self, track_path: Path):
+        self._track_path = track_path.parent
+        
     def configure_from_clusters(self, group_labels: torch.Tensor):
         """
         Given `group_labels`, set the group masks and labels.
@@ -167,6 +171,9 @@ class RigidGroupOptimizer:
                 self.init_p2o[i, 4:] = gp_centroid - self.init_means.mean(dim=0)
                 
         elif self.object_mode == ObjectMode.RIGID_OBJECTS:
+            self.T_world_objmeans = identity_7vec()
+            self.T_world_objmeans[0, 4:] = self.init_means.mean(dim=0).squeeze()
+            
             self.config.atap_config.use_atap = False # Disable atap for multi-rigid
             self.T_world_objinit = identity_7vec().repeat(self.num_groups, 1)
             for i, g in enumerate(self.group_masks):
@@ -174,6 +181,18 @@ class RigidGroupOptimizer:
                 self.T_world_objinit[i, 4:] = gp_centroid
             self.init_p2o = identity_7vec().repeat(self.num_groups, 1)
 
+        # elif self.object_mode == ObjectMode.RIGID_OBJECTS:
+        #     self.config.atap_config.use_atap = False # Disable atap for multi-rigid
+        #     self.T_world_objinit = identity_7vec()
+        #     self.T_world_objinit[0, 4:] = self.init_means.mean(dim=0).squeeze()
+
+        #     # Initialize the part poses to identity. Again, wxyz_xyz.
+        #     # Parts are initialized at the centroid of the part cluster.
+        #     self.init_p2o = identity_7vec().repeat(self.num_groups, 1)
+        #     for i, g in enumerate(self.group_masks):
+        #         gp_centroid = self.init_means[g].mean(dim=0)
+        #         self.init_p2o[i, 4:] = gp_centroid - self.init_means.mean(dim=0)
+            
         self.atap = ATAPLoss(
             self.config.atap_config,
             self.dig_model,
@@ -194,6 +213,34 @@ class RigidGroupOptimizer:
         Initializes object pose w/ observation. Also sets:
         - `self.T_objreg_objinit`
         """
+        if self._track_path is not None:
+            # if track_init exists, load the best pose
+            if (self._track_path/f"track_init.json").exists():
+                with open(self._track_path / f"track_init.json", "r") as f:
+                    track_init_json = json.load(f)
+                    track_init = torch.tensor(track_init_json["best_pose"]).to(self.T_world_objinit.device)
+                    if self.object_mode == ObjectMode.ARTICULATED:
+                        assert track_init.shape == (1, 7), track_init.shape
+                    elif self.object_mode == ObjectMode.RIGID_OBJECTS:
+                        assert track_init.shape == (self.num_groups, 7), track_init.shape
+                    self.T_objreg_objinit = track_init 
+                    # Apply transforms to model
+                    self.apply_to_model(
+                        self.T_objreg_objinit,
+                        identity_7vec().repeat(len(self.group_masks), 1)
+                    )
+                    
+                    # TODO: remove devel debug code
+                    # if render:
+                    #     with torch.no_grad():
+                    #         dig_outputs = self.dig_model.get_outputs(first_obs.frame.camera)
+                    #         import matplotlib.pyplot as plt
+                    #         plt.imshow(dig_outputs['rgb'].cpu().detach().numpy())
+                    #         plt.savefig('render.png')
+                    #         import pdb; pdb.set_trace()
+                    #     return None, None
+                    return None, None
+                    
         renders = []
 
         # Initial guess for 3D object location.
@@ -202,12 +249,11 @@ class RigidGroupOptimizer:
         xs, ys, est_loc_2d = self._find_object_pixel_location(first_obs)
         
         # TODO: Remove debug plot when done devel
-        # import matplotlib.pyplot as plt
-        # plt.imshow(first_obs.frame.rgb.cpu().numpy())
-        # for i in est_loc_2d.shape[0]:
-        #     plt.scatter(est_loc_2d[i][1].cpu().numpy(), est_loc_2d[i][0].cpu().numpy())
-        # plt.savefig("sample_dino2d.png")
-        # import pdb; pdb.set_trace()
+        import matplotlib.pyplot as plt
+        plt.imshow(first_obs.frame.rgb.cpu().numpy())
+        for i in range(est_loc_2d.shape[0]):
+            plt.scatter(est_loc_2d[i][1].cpu().numpy(), est_loc_2d[i][0].cpu().numpy())
+        plt.savefig("sample_dino2d.png") 
             
         ray = first_obs.frame.camera.generate_rays(0, est_loc_2d)
         est_loc_3d = ray.origins + ray.directions * est_dist_to_obj
@@ -276,12 +322,21 @@ class RigidGroupOptimizer:
         _, best_pose, rend = self._try_opt(
             best_pose, first_obs.roi_frame, niter, use_depth = True, lr=0.005, render=render, camera=first_obs.frame.camera
         )
-
         rend_final_opt_frame = 0.6*rend[-1] + 0.4*frame_rgb
-
         assert best_pose.shape == (self.num_groups, 7), best_pose.shape
         self.T_objreg_objinit = best_pose
         logger.info("Initialized object pose")
+        
+        if self._track_path is not None:
+            if not self._track_path.exists():
+                self._track_path.mkdir()
+            with open(self._track_path / f"track_init.json", "w") as f:
+                json.dump(
+                    {
+                        "best_pose": self.T_objreg_objinit.cpu().numpy().tolist(),
+                    },
+                    f,
+                )
         
         return renders, rend_final_opt_frame
 
@@ -565,7 +620,10 @@ class RigidGroupOptimizer:
             self.blur(outputs["dino"].permute(2, 0, 1)[None]).squeeze().permute(1, 2, 0)
         )
         dino_feats = torch.where(object_mask, outputs["dino"], blurred_dino_feats)
-
+        # from rsrd.util.dev_helpers import plot_pca
+        # plot_pca(dino_feats, name="rendered_dino_feats")
+        # plot_pca(frame.dino_feats, name="real_dino_feats")
+        # import pdb; pdb.set_trace()
         if frame.hand_mask is not None:
             loss = (frame.dino_feats[frame.hand_mask] - dino_feats[frame.hand_mask]).norm(dim=-1).mean()
         else:
@@ -655,10 +713,8 @@ class RigidGroupOptimizer:
                 dim=self.dig_model.num_points,
                 inputs = [
                     wp.from_torch(self.T_world_objinit),
-                    wp.from_torch(self.init_p2o),
                     wp.from_torch(obj_delta),
                     wp.from_torch(part_deltas),
-                    wp.from_torch(self.group_labels),
                     wp.from_torch(self.group_labels),
                     wp.from_torch(self.dig_model.gauss_params["means"], dtype=wp.vec3),
                     wp.from_torch(self.dig_model.gauss_params["quats"]),
@@ -726,6 +782,7 @@ class RigidGroupOptimizer:
         save_dict: dict[str, Any] = {
             "part_deltas": self.part_deltas.detach().cpu().tolist(),
             "T_objreg_objinit": self.T_objreg_objinit.detach().cpu().tolist(),
+            "T_world_objinit": self.T_world_objinit.detach().cpu().tolist(),
         }
 
         # Save hand info, if available.
@@ -834,12 +891,6 @@ class RigidGroupOptimizer:
             for hand in [left_hand, right_hand]:
                 if hand is None:
                     continue
-
-                # world ~ camera, since we instantiate camera aligned with the origin.
-                # if len(self.T_objreg_world.wxyz_xyz) > 1:
-                #     objreg_world = tf.SE3(wxyz_xyz = self.T_objreg_world.wxyz_xyz[0]) # For now default to saving hande poses in first object frame
-                # else:
-                #     objreg_world = self.T_objreg_world
                 
                 transform = (
                     self.T_objreg_world
@@ -851,24 +902,22 @@ class RigidGroupOptimizer:
                 )
                 rotmat = transform[:3, :3]
                 translation = transform[:3, 3]
-
                 for key in ["mano_hand_global_orient", "mano_hand_pose", "verts", "keypoints_3d"]:
                     hand[key] = np.einsum("ij,...j->...i", rotmat, hand[key])
                 
                 hand["verts"] += translation
                 hand["keypoints_3d"] += translation
-
             self.hands_info[frame_id] = (left_hand, right_hand)
-
+    
     @property
     def T_objreg_world(self):
-        assert self.T_objreg_objinit is not None
-        if self.object_mode == ObjectMode.RIGID_OBJECTS:
-            # Always use first object's transform as base frame
-            return tf.SE3(self.T_world_objinit[0:1]) @ tf.SE3(self.T_objreg_objinit[0:1])
-        else:
+        assert self.T_objreg_objinit is not None, "Must initialize first with the first frame"
+        if self.object_mode == ObjectMode.ARTICULATED:
             # Original single object case 
             return tf.SE3(self.T_world_objinit) @ tf.SE3(self.T_objreg_objinit)
+        elif self.object_mode == ObjectMode.RIGID_OBJECTS:
+            # Use first object's transform as base frame
+            return tf.SE3(self.T_world_objinit[0:1]) @ tf.SE3(self.T_objreg_objinit[0:1])
     
     def detect_motion_phases(self, radius_pos=0.1):
         """
@@ -879,7 +928,7 @@ class RigidGroupOptimizer:
             part_deltas: Tensor of shape [num_timesteps, num_parts, 7] (wxyz_xyz format)
             radius_quat: Quaternion distance threshold from initial pose
             radius_pos: Position distance threshold from initial pose (in same units as positions)
-            
+        
         Returns:
             starts: Tensor of shape [num_parts] containing start frame indices
             ends: Tensor of shape [num_parts] containing end frame indices

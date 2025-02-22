@@ -90,14 +90,16 @@ class ViserRSRD:
             torch.clamp(dig_model.colors, 0.0, 1.0).detach()[group_mask].cpu().numpy()
         )
         opacities = torch.sigmoid(dig_model.opacities[group_mask]).detach().cpu().numpy()
-        # opacities = np.ones((rgbs.shape[0], 1))
 
         # Add the frame to the scene. Convention is xyz_wxyz.
         if self.optimizer.object_mode == ObjectMode.ARTICULATED:
             p2o_7vec = self.optimizer.init_p2o[group_idx].cpu().numpy()
         elif self.optimizer.object_mode == ObjectMode.RIGID_OBJECTS:
-            p2o_7vec = (tf.SE3(wxyz_xyz = self.optimizer.T_objreg_objinit[0]).inverse() @ tf.SE3(wxyz_xyz = self.optimizer.T_world_objinit[group_idx]) @ tf.SE3(wxyz_xyz = self.optimizer.T_objreg_objinit[group_idx])).wxyz_xyz.cpu().numpy()
-        
+            base_transform = self.optimizer.T_objreg_world
+            current_transform = tf.SE3(wxyz_xyz=self.optimizer.T_world_objinit[group_idx]) @ tf.SE3(wxyz_xyz=self.optimizer.T_objreg_objinit[group_idx])
+            p2o_transform = base_transform.inverse() @ current_transform
+            p2o_7vec = p2o_transform.wxyz_xyz[0].cpu().numpy()
+
         self.part_frames.append(
             self._server.scene.add_frame(
                 frame_name,

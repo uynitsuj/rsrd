@@ -136,6 +136,7 @@ class GraspableObject:
                     .numpy()
                 )
                 part_means -= part_means.mean(axis=0)
+                # TODO: needs different handling for multi-rigid obj
                 part_means = (
                     jaxlie.SE3(jnp.array(self.optimizer.init_p2o[part_idx].cpu()))
                     @ jaxlie.SE3(jnp.array(delta.detach().cpu().numpy()))
@@ -276,7 +277,7 @@ class GraspablePart:
         pc.points = o3d.utility.Vector3dVector(points)
         pc.estimate_normals()
 
-        mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(pc, 0.04)
+        mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(pc, 0.03)
         mesh.compute_vertex_normals()
 
         mesh = trimesh.Trimesh(
@@ -290,7 +291,7 @@ class GraspablePart:
         )
 
         # Simplify the mesh.
-        _mesh = _mesh.simplify_quadric_decimation(100)  # This affects speed by a lot!
+        _mesh = _mesh.simplify_quadric_decimation(150)  # This affects speed by a lot!
 
         # Correct normals are important for grasp sampling!
         try:
