@@ -41,6 +41,7 @@ from rsrd.extras.cam_helpers import (
 )
 from rsrd.robot.graspable_obj import GraspableObject
 from rsrd.extras.viser_rsrd import ViserRSRD
+from rsrd.util.frame_detectors import Hand2DDetector, Hand3DDetector, MonoDepthEstimator
 
 torch.set_float32_matmul_precision("high")
 
@@ -51,6 +52,7 @@ import jax_dataclasses as jdc
 import jaxlie
 from torchvision.transforms.functional import resize
 
+from PIL import Image
 
 
 def main(
@@ -63,7 +65,7 @@ def main(
     hand_mode: Literal["single", "bimanual"] = "bimanual",
     camera_intr_type: CameraIntr = IPhoneIntr(),
     save_hand: bool = True,
-    plot_hands: bool = False,
+    plot_hands: bool = False, # Currently buggy for multi-rigid obj? Or maybe hand detection is suboptimal
     ):
     """Track objects in video using RSRD.
 
@@ -114,9 +116,7 @@ def main(
     writer.setup_local_writer(
         train_config.logging, max_iter=train_config.max_num_iterations
     )
-    
-    # TODO: See if we can check if multi-rigid or articulated from some info in the state.pt file(s)
-    
+        
     try:
         pipeline.load_state()
         pipeline.reset_colors()
@@ -159,13 +159,7 @@ def main(
     # Load camera and hands info, in the object frame.
     assert optimizer.T_objreg_objinit is not None
     
-    # if len(optimizer.T_objreg_world.wxyz_xyz) > 1: #TODO: Maybe suboptimal? 
-    #     objreg_world = tf.SE3(wxyz_xyz = optimizer.T_objreg_world.wxyz_xyz[1]) # For now default to saving hande poses in first object frame
-    # else:
-    #     objreg_world = optimizer.T_objreg_world
-    
     T_cam_obj = optimizer.T_objreg_world.inverse()
-    
     
     T_cam_obj = (
         T_cam_obj @
@@ -226,16 +220,18 @@ def main(
         if hand_mode == "bimanual":
             parts_moved_by_hand = obj.rank_parts_to_move_bimanual()[0] # Returns tuple with (left_idx, right_idx)
         elif hand_mode == "single":
-            parts_moved_by_hand = obj.rank_parts_to_move_single()[0]
+            parts_moved_by_hand = [obj.rank_parts_to_move_single()[0]]
         
         _, new_grasps = obj.rank_grasps_from_hands()
         
         for i, part in enumerate(obj.parts):
+            
             meshes.append(
                 server.scene.add_mesh_trimesh(
                     f"/object/group_{i}/delta/mesh_{i}",
                     part.mesh,
                     scale = optimizer.dataset_scale,
+                    visible=False,
                 )
             )
             
@@ -245,6 +241,7 @@ def main(
                     f"/object/group_{i}/delta/grasps/mesh",
                     new_grasps[i].to_trimesh(axes_radius=0.001, axes_height=0.05),
                     scale = optimizer.dataset_scale,
+                    visible=False,
                     )
                 )
 
@@ -293,6 +290,7 @@ def main(
             wxyz=T_cam_obj.rotation().wxyz.detach().cpu().numpy().squeeze(),
             image = vid_frame
         )
+        
 
 def render_video(
     optimizer: RigidGroupOptimizer,
@@ -342,18 +340,18 @@ def track_and_save_motion(
     obs = optimizer.create_observation_from_rgb_and_camera(rgb, camera)
 
     # Initialize.
-    renders = optimizer.initialize_obj_pose(obs, render=True, niter=150, n_seeds=8)
-
-    # Save the frames.
-    out_clip = mpy.ImageSequenceClip(renders, fps=30)
-    out_clip.write_videofile(str(camopt_render_path), codec="libx264",bitrate='5000k')
-    out_clip.write_videofile(str(camopt_render_path).replace('.mp4','_mac_compat.mp4'),codec='mpeg4',bitrate='5000k')
-
-    # Add each frame, optimize them separately.
-    # renders = []
+    optimizer.set_track_path(track_data_path)
+    renders, final_frame  = optimizer.initialize_obj_pose(obs, render=True, niter=150, n_seeds=8)
     
-    pre_smooth_dir = frame_opt_path.parent / "pre_smooth_frames"
-    pre_smooth_dir.mkdir(parents=True, exist_ok=True)
+    if final_frame is not None:
+        final_frame_pil = Image.fromarray(final_frame.astype(np.uint8))
+        final_frame_pil.save(str(camopt_render_path).replace('.mp4','_final_opt.png'))
+    
+    if renders is not None:
+        # Save the frames.
+        out_clip = mpy.ImageSequenceClip(renders, fps=30)
+        out_clip.write_videofile(str(camopt_render_path), codec="libx264",bitrate='5000k')
+        out_clip.write_videofile(str(camopt_render_path).replace('.mp4','_mac_compat.mp4'),codec='mpeg4',bitrate='5000k')
     
     for frame_id in tqdm.trange(0, num_frames):
         try:
@@ -364,7 +362,7 @@ def track_and_save_motion(
 
         obs = optimizer.create_observation_from_rgb_and_camera(rgb, camera)
         optimizer.add_observation(obs)
-        optimizer.fit([frame_id], 30)
+        optimizer.fit([frame_id], 50)
         # if num_frames > 100:
         #     obs.clear_cache() # Clear the cache to save memory (can overflow on very long videos)
         if frame_id % 20 == 0:
@@ -391,7 +389,7 @@ def track_and_save_motion(
     # for start in tqdm.trange(0, num_frames, segment_len):
     #     end = min(start + segment_len, num_frames)
     #     optimizer.fit(list(range(start, end)), 50)
-    optimizer.fit(list(range(num_frames)), 30)
+    optimizer.fit(list(range(num_frames)), 50)
     logger.info("Finished temporal smoothing.")
 
     # Save part trajectories.

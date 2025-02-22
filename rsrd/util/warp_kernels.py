@@ -71,10 +71,9 @@ def apply_to_model_warp(
 @wp.kernel
 def apply_to_model_warp_multi_object(
     init_o2w: wp.array(dtype=float, ndim=2),
-    init_p2o: wp.array(dtype=float, ndim=2),
     obj_deltas: wp.array(dtype=float, ndim=2),
     part_deltas: wp.array(dtype=float, ndim=2),
-    part_labels: wp.array(dtype=int),
+    # part_labels: wp.array(dtype=int),
     obj_labels: wp.array(dtype=int),
     means: wp.array(dtype=wp.vec3),
     quats: wp.array(dtype=float, ndim=2),
@@ -120,16 +119,16 @@ def apply_to_model_warp_multi_object(
     2. Apply Deltas: new_g2w_T = o2w_T * obj_delta_T * p2o_T * part_delta_T * g2p_T
     """
     tid = wp.tid()
-    part_id = part_labels[tid]  # Which part this Gaussian belongs to
+    # part_id = part_labels[tid]  # Which part this Gaussian belongs to
     obj_id = obj_labels[tid]   # Which object this Gaussian belongs to
     
     # Get the initial transforms
     o2w_T = poses_7vec_to_transform(init_o2w, obj_id)      # Object -> World
-    p2o_T = poses_7vec_to_transform(init_p2o, part_id)     # Part -> Object
+    # p2o_T = poses_7vec_to_transform(init_p2o, part_id)     # Part -> Object
     
     # Get the delta transforms
-    obj_delta_T = poses_7vec_to_transform(obj_deltas, obj_id)    # Object motion
-    part_delta_T = poses_7vec_to_transform(part_deltas, part_id) # Sub-Part motion
+    obj_delta_T = poses_7vec_to_transform(obj_deltas, obj_id)    # Object registration
+    part_delta_T = poses_7vec_to_transform(part_deltas, obj_id) # Sub-Part motion
     
     # Current Gaussian pose in world space
     g2w_T = wp.transformation(
@@ -137,9 +136,13 @@ def apply_to_model_warp_multi_object(
         wp.quaternion(quats[tid, 1], quats[tid, 2], quats[tid, 3], quats[tid, 0]),
     )
     
-    g2p_T = wp.transform_inverse(p2o_T) * wp.transform_inverse(o2w_T) * g2w_T
+    # g2p_T = wp.transform_inverse(p2o_T) * wp.transform_inverse(o2w_T) * g2w_T
+    
+    g2p_T = wp.transform_inverse(o2w_T) * g2w_T
 
-    new_g2w_T = o2w_T * obj_delta_T * p2o_T * part_delta_T * g2p_T
+    # new_g2w_T = o2w_T * obj_delta_T * p2o_T * part_delta_T * g2p_T
+    
+    new_g2w_T = o2w_T * obj_delta_T * part_delta_T * g2p_T
     
     means_out[tid] = wp.transform_get_translation(new_g2w_T)
     new_quat = wp.transform_get_rotation(new_g2w_T)

@@ -331,6 +331,8 @@ class PosedObservation:
                     optimizer.config.roi_inflate * (valid_xs.max() - valid_xs.min()).item(),
                     optimizer.config.roi_inflate * (valid_ys.max() - valid_ys.min()).item(),
                 )  # x, y
+                if len(valid_xs) == 0 or len(valid_ys) == 0:
+                        raise RuntimeError(f"[{optimizer.object_mode}] No pixels rendered for ROI, did the object leave the frustum?")
                 xmin, xmax, ymin, ymax = (
                     max(0, valid_xs.min().item() - inflate_amnt[0]),
                     min(1, valid_xs.max().item() + inflate_amnt[0]),
@@ -339,6 +341,13 @@ class PosedObservation:
                 )
                 return xmin, xmax, ymin, ymax
             if optimizer.object_mode == ObjectMode.RIGID_OBJECTS:
+                
+                # import matplotlib.pyplot as plt
+                # outputs = optimizer.dig_model.get_outputs(self.frame.camera, rgb_only=True)
+                # plt.imshow(outputs['rgb'].cpu().detach().numpy())
+                # plt.savefig('render.png')
+                # import pdb; pdb.set_trace()
+                
                 xmins, xmaxs, ymins, ymaxs = [], [], [], []
                 for obj_id in range(optimizer.num_groups):
                     outputs = optimizer.dig_model.get_outputs(self.frame.camera, obj_id=obj_id, rgb_only=True)
@@ -346,6 +355,8 @@ class PosedObservation:
                     valids = torch.where(object_mask)
                     valid_xs = valids[1] / object_mask.shape[1]
                     valid_ys = valids[0] / object_mask.shape[0]  # normalize to 0-1
+                    if len(valid_xs) == 0 or len(valid_ys) == 0:
+                        raise RuntimeError(f"[{optimizer.object_mode}] No pixels rendered for ROI on object {obj_id}, did the object leave the frustum?")
                     inflate_amnt = (
                         optimizer.config.roi_inflate * (valid_xs.max() - valid_xs.min()).item(),
                         optimizer.config.roi_inflate * (valid_ys.max() - valid_ys.min()).item(),

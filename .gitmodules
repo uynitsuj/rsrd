@@ -19,7 +19,7 @@
 [submodule "dependencies/hamer"]
 	path = dependencies/hamer
 	url = https://github.com/geopavlakos/hamer.git
-# [submodule "dependencies/nerfstudio"]
-# 	path = dependencies/nerfstudio
-# 	url = https://github.com/nerfstudio-project/nerfstudio.git
-# 	branch = 4a3e3e6
+[submodule "dependencies/nerfstudio"]
+	path = dependencies/nerfstudio
+	url = https://github.com/nerfstudio-project/nerfstudio.git
+	branch = 4a3e3e6
