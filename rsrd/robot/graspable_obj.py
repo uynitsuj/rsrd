@@ -17,6 +17,7 @@ from jaxmp.extras.grasp_antipodal import AntipodalGrasps
 from rsrd.motion.motion_optimizer import RigidGroupOptimizer
 import rsrd.transforms as tf
 from rsrd.util.common import MANO_KEYPOINTS
+from dig.dig_pipeline import ObjectMode
 
 try:
     import open3d as o3d
@@ -136,12 +137,29 @@ class GraspableObject:
                     .numpy()
                 )
                 part_means -= part_means.mean(axis=0)
-                # TODO: needs different handling for multi-rigid obj
-                part_means = (
-                    jaxlie.SE3(jnp.array(self.optimizer.init_p2o[part_idx].cpu()))
-                    @ jaxlie.SE3(jnp.array(delta.detach().cpu().numpy()))
-                    @ jnp.array(part_means)
-                )
+
+                # part_means = (
+                #     jaxlie.SE3(jnp.array(self.optimizer.init_p2o[part_idx].cpu()))
+                #     @ jaxlie.SE3(jnp.array(delta.detach().cpu().numpy()))
+                #     @ jnp.array(part_means)
+                # )
+                
+                # In the articulated case, use init_p2o, in the multi-rigid case, use per-object transforms.
+                if self.optimizer.object_mode == ObjectMode.RIGID_OBJECTS:
+                    # For multi-rigid objects, each part (group) gets its own world and registration transform.
+                    part_means = (
+                        jaxlie.SE3(jnp.array(self.optimizer.T_world_objinit[part_idx].cpu()))
+                        @ jaxlie.SE3(jnp.array(self.optimizer.T_objreg_objinit[part_idx].cpu()))
+                        @ jaxlie.SE3(jnp.array(delta.detach().cpu().numpy()))
+                        @ jnp.array(part_means)
+                    )
+                else:
+                    # For articulated objects, use the part-to-object transform.
+                    part_means = (
+                        jaxlie.SE3(jnp.array(self.optimizer.init_p2o[part_idx].cpu()))
+                        @ jaxlie.SE3(jnp.array(delta.detach().cpu().numpy()))
+                        @ jnp.array(part_means)
+                    )
 
                 if l_hand is None:
                     l_hand = {"keypoints_3d": onp.zeros((0,))}

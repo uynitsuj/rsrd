@@ -181,18 +181,6 @@ class RigidGroupOptimizer:
                 self.T_world_objinit[i, 4:] = gp_centroid
             self.init_p2o = identity_7vec().repeat(self.num_groups, 1)
 
-        # elif self.object_mode == ObjectMode.RIGID_OBJECTS:
-        #     self.config.atap_config.use_atap = False # Disable atap for multi-rigid
-        #     self.T_world_objinit = identity_7vec()
-        #     self.T_world_objinit[0, 4:] = self.init_means.mean(dim=0).squeeze()
-
-        #     # Initialize the part poses to identity. Again, wxyz_xyz.
-        #     # Parts are initialized at the centroid of the part cluster.
-        #     self.init_p2o = identity_7vec().repeat(self.num_groups, 1)
-        #     for i, g in enumerate(self.group_masks):
-        #         gp_centroid = self.init_means[g].mean(dim=0)
-        #         self.init_p2o[i, 4:] = gp_centroid - self.init_means.mean(dim=0)
-            
         self.atap = ATAPLoss(
             self.config.atap_config,
             self.dig_model,
@@ -876,9 +864,15 @@ class RigidGroupOptimizer:
         with torch.no_grad():
             self.apply_keyframe(frame_id)
             curr_obs = self.sequence[frame_id]
+
+            if self.object_mode == ObjectMode.RIGID_OBJECTS:
+                obj_id = [i for i in range(self.num_groups) if i not in self.fixed_object_ids]
+            else:
+                obj_id = None
+            
             outputs = cast(
                 dict[str, torch.Tensor],
-                self.dig_model.get_outputs(curr_obs.frame.camera, rgb_only=True),
+                self.dig_model.get_outputs(curr_obs.frame.camera, rgb_only=True, obj_id=obj_id),
             )
             object_mask = outputs["accumulation"] > self.config.mask_threshold
 
