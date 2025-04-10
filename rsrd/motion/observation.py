@@ -324,6 +324,12 @@ class PosedObservation:
             if optimizer.object_mode == ObjectMode.ARTICULATED:
                 outputs = optimizer.dig_model.get_outputs(self.frame.camera)
                 object_mask = outputs["accumulation"] > optimizer.config.mask_threshold
+                
+                # import matplotlib.pyplot as plt
+                # plt.imshow(object_mask.cpu().detach().numpy())
+                # plt.savefig('accum_render.png')
+                # import pdb; pdb.set_trace()
+                
                 valids = torch.where(object_mask)
                 valid_xs = valids[1] / object_mask.shape[1]
                 valid_ys = valids[0] / object_mask.shape[0]  # normalize to 0-1
@@ -365,7 +371,7 @@ class PosedObservation:
                     xmins.append(max(0, valid_xs.min().item() - inflate_amnt[0]))
                     xmaxs.append(min(1, valid_xs.max().item() + inflate_amnt[0]))
                     ymins.append(max(0, valid_ys.min().item() - inflate_amnt[1]))
-                    ymaxs.append(min(1, valid_ys.max().item() + inflate_amnt[1]))            
+                    ymaxs.append(min(1, valid_ys.max().item() + inflate_amnt[1]))   
                 return xmins, xmaxs, ymins, ymaxs
 
     def compute_and_set_roi(self, optimizer):

@@ -54,13 +54,14 @@ from torchvision.transforms.functional import resize
 
 from PIL import Image
 
+'''
+python xi/dependencies/rsrd/scripts/run_tracker.py --output-dir outputs/led_light2/track2/ --is-obj-jointed True --dig-config-path outputs/led_light2/dig/2025-04-07_130425/config.yml --video-path xi/data/corl_data/jy_demonstrations/led_light5.mov --hand-mode single
+'''
 
 def main(
     output_dir: Path,
     is_obj_jointed: Optional[bool] = None,
     dig_config_path: Optional[Path] = None, 
-    # TODO: Might be able to tell if setting is multi-rigid obj or articulated from the dig state.pt(s); i.e. in the case of multi-rigid objects, will have multiple state.pts
-    # Can't think of a scenario where we'd be manipulating a single rigid object w.r.t. no other object/reference, but could be wrong
     video_path: Optional[Path] = None,
     hand_mode: Literal["single", "bimanual"] = "bimanual",
     camera_intr_type: CameraIntr = IPhoneIntr(),

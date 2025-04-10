@@ -53,7 +53,7 @@ class RigidGroupOptimizerConfig:
     pose_lr_final: float = 0.001
     mask_hands: bool = False
     blur_kernel_size: int = 5
-    mask_threshold: float = 0.8
+    mask_threshold: float = 0.7
     rgb_loss_weight: float = 0.05
     part_still_weight: float = 0.01
 
@@ -201,33 +201,32 @@ class RigidGroupOptimizer:
         Initializes object pose w/ observation. Also sets:
         - `self.T_objreg_objinit`
         """
-        if self._track_path is not None:
-            # if track_init exists, load the best pose
-            if (self._track_path/f"track_init.json").exists():
-                with open(self._track_path / f"track_init.json", "r") as f:
-                    track_init_json = json.load(f)
-                    track_init = torch.tensor(track_init_json["best_pose"]).to(self.T_world_objinit.device)
-                    if self.object_mode == ObjectMode.ARTICULATED:
-                        assert track_init.shape == (1, 7), track_init.shape
-                    elif self.object_mode == ObjectMode.RIGID_OBJECTS:
-                        assert track_init.shape == (self.num_groups, 7), track_init.shape
-                    self.T_objreg_objinit = track_init 
-                    # Apply transforms to model
-                    self.apply_to_model(
-                        self.T_objreg_objinit,
-                        identity_7vec().repeat(len(self.group_masks), 1)
-                    )
+        # if self._track_path is not None:
+        #     # if track_init exists, load the best pose
+        #     if (self._track_path/f"track_init.json").exists():
+        #         with open(self._track_path / f"track_init.json", "r") as f:
+        #             track_init_json = json.load(f)
+        #             track_init = torch.tensor(track_init_json["best_pose"]).to(self.T_world_objinit.device)
+        #             if self.object_mode == ObjectMode.ARTICULATED:
+        #                 assert track_init.shape == (1, 7), track_init.shape
+        #             elif self.object_mode == ObjectMode.RIGID_OBJECTS:
+        #                 assert track_init.shape == (self.num_groups, 7), track_init.shape
+        #             self.T_objreg_objinit = track_init 
+        #             # Apply transforms to model
+        #             self.apply_to_model(
+        #                 self.T_objreg_objinit,
+        #                 identity_7vec().repeat(len(self.group_masks), 1)
+        #             )
                     
-                    # TODO: remove devel debug code
-                    # if render:
-                    #     with torch.no_grad():
-                    #         dig_outputs = self.dig_model.get_outputs(first_obs.frame.camera)
-                    #         import matplotlib.pyplot as plt
-                    #         plt.imshow(dig_outputs['rgb'].cpu().detach().numpy())
-                    #         plt.savefig('render.png')
-                    #         import pdb; pdb.set_trace()
-                    #     return None, None
-                    return None, None
+        #             first_obs.compute_and_set_roi(self)
+        #             _, best_pose, rend = self._try_opt(
+        #                 track_init, first_obs.roi_frame, niter, use_depth = True, lr=0.005, render=render, camera=first_obs.frame.camera
+        #             )
+
+        #             logger.info("Initialized object pose")
+        #             self.T_objreg_objinit = best_pose
+
+        #             return None, None
                     
         renders = []
 
@@ -285,7 +284,7 @@ class RigidGroupOptimizer:
             rend = [0.6*r + 0.4*frame_rgb for r in rend]
             renders.extend(rend)
 
-            # TODO: Try per-obj loss to find best poses (otherwise all objects need to converge to optimal init pose on the same seed)
+            # TODO: see if per-object loss is possible to find best poses (otherwise all objects need to converge to optimal init pose on the same seed)
             if loss is not None and loss < best_loss:
                 best_loss = loss
                 best_pose = final_pose
@@ -295,23 +294,18 @@ class RigidGroupOptimizer:
         
         first_obs.compute_and_set_roi(self)
         
-        # TODO: Remove debug plot when done devel
-        # import matplotlib.pyplot as plt
-        # from rsrd.util.dev_helpers import plot_pca
-        # plt.imshow(first_obs.roi_frame[0].rgb.cpu().numpy())
-        # plt.savefig("obj1.png")
-        # plt.imshow(first_obs.roi_frame[1].rgb.cpu().numpy())
-        # plt.savefig("obj2.png")
-        # plot_pca(first_obs.roi_frame[0].dino_feats, name="obj1_dino_feats")
-        # plot_pca(first_obs.roi_frame[1].dino_feats, name="obj2_dino_feats")
-        # import pdb; pdb.set_trace()
         
         # # Note the lower LR, for this fine-tuning step.
+        
         _, best_pose, rend = self._try_opt(
             best_pose, first_obs.roi_frame, niter, use_depth = True, lr=0.005, render=render, camera=first_obs.frame.camera
         )
         rend_final_opt_frame = 0.6*rend[-1] + 0.4*frame_rgb
-        assert best_pose.shape == (self.num_groups, 7), best_pose.shape
+        
+        if self.object_mode == ObjectMode.ARTICULATED:
+            assert best_pose.shape == (1, 7), best_pose.shape
+        elif self.object_mode == ObjectMode.RIGID_OBJECTS:
+            assert best_pose.shape == (self.num_groups, 7), best_pose.shape
         self.T_objreg_objinit = best_pose
         logger.info("Initialized object pose")
         
@@ -487,7 +481,7 @@ class RigidGroupOptimizer:
             loss = loss.item()
             if render:
                 with torch.no_grad():
-                    if isinstance(frame, list):
+                    if isinstance(frame, list) or camera is not None:
                         assert camera is not None, "For multi-ROI frames please explicitly provide original camera for full render"
                         dig_outputs = self.dig_model.get_outputs(camera)
                     else:
@@ -517,7 +511,7 @@ class RigidGroupOptimizer:
             x, y = (match_ids*downsamp % (obs.frame.camera.width)).float(), (
                 match_ids*downsamp // (obs.frame.camera.width)
             ).float()
-            return x, y, torch.tensor([y.median().item(), x.median().item()], device="cuda")
+            return x, y, torch.tensor([[y.median().item(), x.median().item()]], device="cuda")
         
         elif self.object_mode == ObjectMode.RIGID_OBJECTS: # return a list of xs and ys per rigid object
             xs, ys = [], []
@@ -545,7 +539,7 @@ class RigidGroupOptimizer:
         loss = torch.Tensor([0.0]).cuda()
         outputs = (cast(
             dict[str, torch.Tensor],
-            self.dig_model.get_outputs(frame.camera, obj_id=obj_id)
+            self.dig_model.get_outputs(frame.camera) #, obj_id=obj_id)
         ))
         assert "accumulation" in outputs, outputs.keys()
         with torch.no_grad():
