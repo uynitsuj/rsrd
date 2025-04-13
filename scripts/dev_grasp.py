@@ -41,8 +41,9 @@ from rsrd.extras.cam_helpers import (
 )
 from rsrd.robot.graspable_obj import GraspableObject
 from rsrd.extras.viser_rsrd import ViserRSRD
-from rsrd.extras.grasp_helper import GraspDevMRO
+from rsrd.extras.grasp_helper import GraspDevMRO, GraspDevArticulated
 
+from dig.dig_pipeline import ObjectMode
 torch.set_float32_matmul_precision("high")
 
 #Temp
@@ -58,12 +59,6 @@ from PIL import Image
 def main(
     dig_config: Path, 
     ):
-    """Track objects in video using RSRD.
-
-    If a `cache_info.json` file is found in the output directory,
-    the tracker will load using the cached data + paths and skip tracking.
-    """
-
     
     assert dig_config is not None, "Must provide a dig config path."
     server = viser.ViserServer()
@@ -75,12 +70,21 @@ def main(
     pipeline.load_state()
     dataset_scale = pipeline.datamanager.train_dataset._dataparser_outputs.dataparser_scale
     ns_output_path = dig_config.parent.parent.parent
-    GraspDevMRO(
-        server,
-        pipeline,
-        ns_output_path,
-        1/dataset_scale,
-        )
+
+    if pipeline.object_mode == ObjectMode.RIGID_OBJECTS:
+        GraspDevMRO(
+            server,
+            pipeline,
+            ns_output_path,
+            1/dataset_scale,
+            )
+    elif pipeline.object_mode == ObjectMode.ARTICULATED:
+        GraspDevArticulated(
+            server,
+            pipeline,
+            ns_output_path,
+            1/dataset_scale,
+            )
     while True:
         time.sleep(0.2)
     

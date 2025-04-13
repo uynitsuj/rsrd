@@ -58,7 +58,7 @@ class RigidGroupOptimizerConfig:
     part_still_weight: float = 0.01
 
     approx_dist_to_obj: float = 0.55  # in meters
-    altitude_down: float = np.pi / 6  # in radians
+    altitude_down: float = np.pi / 4  # in radians
 
 class RigidGroupOptimizer:
     dig_model: DiGModel
@@ -201,32 +201,32 @@ class RigidGroupOptimizer:
         Initializes object pose w/ observation. Also sets:
         - `self.T_objreg_objinit`
         """
-        # if self._track_path is not None:
-        #     # if track_init exists, load the best pose
-        #     if (self._track_path/f"track_init.json").exists():
-        #         with open(self._track_path / f"track_init.json", "r") as f:
-        #             track_init_json = json.load(f)
-        #             track_init = torch.tensor(track_init_json["best_pose"]).to(self.T_world_objinit.device)
-        #             if self.object_mode == ObjectMode.ARTICULATED:
-        #                 assert track_init.shape == (1, 7), track_init.shape
-        #             elif self.object_mode == ObjectMode.RIGID_OBJECTS:
-        #                 assert track_init.shape == (self.num_groups, 7), track_init.shape
-        #             self.T_objreg_objinit = track_init 
-        #             # Apply transforms to model
-        #             self.apply_to_model(
-        #                 self.T_objreg_objinit,
-        #                 identity_7vec().repeat(len(self.group_masks), 1)
-        #             )
+        if self._track_path is not None:
+            # if track_init exists, load the best pose
+            if (self._track_path/f"track_init.json").exists():
+                with open(self._track_path / f"track_init.json", "r") as f:
+                    track_init_json = json.load(f)
+                    track_init = torch.tensor(track_init_json["best_pose"]).to(self.T_world_objinit.device)
+                    if self.object_mode == ObjectMode.ARTICULATED:
+                        assert track_init.shape == (1, 7), track_init.shape
+                    elif self.object_mode == ObjectMode.RIGID_OBJECTS:
+                        assert track_init.shape == (self.num_groups, 7), track_init.shape
+                    self.T_objreg_objinit = track_init 
+                    # Apply transforms to model
+                    self.apply_to_model(
+                        self.T_objreg_objinit,
+                        identity_7vec().repeat(len(self.group_masks), 1)
+                    )
                     
-        #             first_obs.compute_and_set_roi(self)
-        #             _, best_pose, rend = self._try_opt(
-        #                 track_init, first_obs.roi_frame, niter, use_depth = True, lr=0.005, render=render, camera=first_obs.frame.camera
-        #             )
+                    first_obs.compute_and_set_roi(self)
+                    _, best_pose, rend = self._try_opt(
+                        track_init, first_obs.roi_frame, niter, use_depth = True, lr=0.005, render=render, camera=first_obs.frame.camera
+                    )
 
-        #             logger.info("Initialized object pose")
-        #             self.T_objreg_objinit = best_pose
+                    logger.info("Initialized object pose")
+                    self.T_objreg_objinit = best_pose
 
-        #             return None, None
+                    return None, None
                     
         renders = []
 
