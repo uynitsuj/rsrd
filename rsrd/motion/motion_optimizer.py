@@ -42,23 +42,23 @@ except ModuleNotFoundError:
 @dataclass
 class RigidGroupOptimizerConfig:
     use_depth: bool = True
-    use_rgb: bool = True
+    use_rgb: bool = False
     rank_loss_mult: float = 0.2
     rank_loss_erode: int = 3
     depth_ignore_threshold: float = 0.1  # in meters
     atap_config: ATAPConfig = field(default_factory=ATAPConfig)
     use_roi: bool = True
     roi_inflate: float = 0.25
-    pose_lr: float = 0.005
-    pose_lr_final: float = 0.001
+    pose_lr: float = 0.001
+    pose_lr_final: float = 0.0005
     mask_hands: bool = False
     blur_kernel_size: int = 5
     mask_threshold: float = 0.7
     rgb_loss_weight: float = 0.05
     part_still_weight: float = 0.01
 
-    approx_dist_to_obj: float = 0.55  # in meters
-    altitude_down: float = np.pi / 4  # in radians
+    approx_dist_to_obj: float = 0.45  # in meters
+    altitude_down: float = 0.1 #np.pi / 6  # in radians
 
 class RigidGroupOptimizer:
     dig_model: DiGModel
@@ -201,6 +201,8 @@ class RigidGroupOptimizer:
         Initializes object pose w/ observation. Also sets:
         - `self.T_objreg_objinit`
         """
+        renders = []
+        frame_rgb = (first_obs.frame.rgb.cpu().numpy()*255).astype(np.uint8)
         if self._track_path is not None:
             # if track_init exists, load the best pose
             if (self._track_path/f"track_init.json").exists():
@@ -220,15 +222,17 @@ class RigidGroupOptimizer:
                     
                     first_obs.compute_and_set_roi(self)
                     _, best_pose, rend = self._try_opt(
-                        track_init, first_obs.roi_frame, niter, use_depth = True, lr=0.005, render=render, camera=first_obs.frame.camera
+                        track_init, first_obs.roi_frame, 1, use_depth = True, lr=0.005, render=render, camera=first_obs.frame.camera
                     )
 
                     logger.info("Initialized object pose")
                     self.T_objreg_objinit = best_pose
-
-                    return None, None
                     
-        renders = []
+                    rend_final_opt_frame = 0.6*rend[-1] + 0.4*frame_rgb
+                    rend = [0.6*r + 0.4*frame_rgb for r in rend]
+                    renders.extend(rend)
+                    return renders, rend_final_opt_frame
+                    
 
         # Initial guess for 3D object location.
         est_dist_to_obj = self.config.approx_dist_to_obj * self.dataset_scale  # scale to nerfstudio world.
@@ -253,13 +257,13 @@ class RigidGroupOptimizer:
         elif self.object_mode == ObjectMode.RIGID_OBJECTS:
             obj_centroid = self.T_world_objinit.clone()[:, 4:]
             
-        frame_rgb = (first_obs.frame.rgb.cpu().numpy()*255).astype(np.uint8)
+        
         for z_rot in tqdm(np.linspace(0, np.pi * 2, n_seeds), "Trying seeds..."):
             if self.object_mode == ObjectMode.ARTICULATED:
                 candidate_pose = torch.zeros(1, 7, dtype=torch.float32, device="cuda")
             elif self.object_mode == ObjectMode.RIGID_OBJECTS:
                 # Generate a uniform random z_rot per rigid object
-                z_rot = torch.rand((self.num_groups,)) * 2 * np.pi
+                # z_rot = torch.rand((self.num_groups,)) * 2 * np.pi
                 
                 candidate_pose = torch.zeros(self.num_groups, 7, dtype=torch.float32, device="cuda")
             candidate_pose[:, :4] = (
@@ -539,7 +543,7 @@ class RigidGroupOptimizer:
         loss = torch.Tensor([0.0]).cuda()
         outputs = (cast(
             dict[str, torch.Tensor],
-            self.dig_model.get_outputs(frame.camera) #, obj_id=obj_id)
+            self.dig_model.get_outputs(frame.camera)#, obj_id=obj_id)
         ))
         assert "accumulation" in outputs, outputs.keys()
         with torch.no_grad():

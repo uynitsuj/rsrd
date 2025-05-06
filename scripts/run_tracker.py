@@ -54,10 +54,6 @@ from torchvision.transforms.functional import resize
 
 from PIL import Image
 
-'''
-python xi/dependencies/rsrd/scripts/run_tracker.py --output-dir outputs/led_light2/track2/ --is-obj-jointed True --dig-config-path outputs/led_light2/dig/2025-04-07_130425/config.yml --video-path xi/data/corl_data/jy_demonstrations/led_light5.mov --hand-mode single
-'''
-
 def main(
     output_dir: Path,
     is_obj_jointed: Optional[bool] = None,
@@ -242,7 +238,7 @@ def main(
                     f"/object/group_{i}/delta/grasps/mesh",
                     new_grasps[i].to_trimesh(axes_radius=0.001, axes_height=0.05),
                     scale = optimizer.dataset_scale,
-                    visible=False,
+                    visible=True,
                     )
                 )
 
@@ -263,6 +259,27 @@ def main(
                         scale = optimizer.dataset_scale,
                     )
                 )
+                if hand_mode == "bimanual":
+                    if parts_moved_by_hand[0] == parts_moved_by_hand[1]:
+                        # Handle single object bimanual grasp case
+                        top_grasp2 = new_grasps[i].finger_prox_scores.argsort()[-2].item()
+                        transform = np.eye(4)
+                        rotation = trimesh.transformations.rotation_matrix(np.pi / 2, [0, 1, 0])
+                        transform[:3, :3] = rotation[:3, :3]
+                        mesh = trimesh.creation.cylinder(
+                            radius=0.001, height=0.05, transform=transform
+                        )
+                        grasp_tf2 = new_grasps[i].to_se3(along_axis='x').as_matrix()[top_grasp2]
+                        mesh.apply_transform(grasp_tf2)
+                        mesh.visual.vertex_colors = np.array([150, 150, 255, 255])
+                        meshes.append(
+                            server.scene.add_mesh_trimesh(
+                                f"/object/group_{i}/delta/top_grasp2/mesh",
+                                mesh,
+                                scale = optimizer.dataset_scale,
+                            )
+                        )
+                            
     
     sample_grasps(optimizer)
     regen_grasps.disabled = False

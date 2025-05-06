@@ -91,12 +91,12 @@ class GraspDevMRO:
         self._load_gaussian_ply(gaussian_ply_path)
         
         # First try to find fixed_normals_centered obj file
-        mesh_obj_path = list(sub_part_file.glob("*_fixed_normals_centered.obj"))
+        mesh_obj_path = list(state_path.glob("*_fixed_normals_centered.obj"))
         if not mesh_obj_path:
             # If not found, look for any obj file
-            mesh_obj_path = list(sub_part_file.glob("*.obj"))
+            mesh_obj_path = list(state_path.glob("*.obj"))
             if not mesh_obj_path:
-                print(f"Warning: No .obj files found in {sub_part_file}")
+                print(f"Warning: No .obj files found in {state_path}")
                 return
         self._load_mesh(mesh_obj_path[0])
     
@@ -113,6 +113,10 @@ class GraspDevMRO:
                 visible=False,
             )
         )
+        # Save the graspable part mesh to file
+        mesh_save_path = self.pipeline.state_dir / self.rigid_state_handle.value / 'graspable_part_mesh.obj'
+        self.graspable_part.mesh.export(mesh_save_path)
+        print(f"Saved graspable part mesh to {mesh_save_path}")
         
         self.grasp_axis_mesh_handles.append(
                 self._server.scene.add_mesh_trimesh(
@@ -148,7 +152,7 @@ class GraspDevMRO:
             / "../../data/yumi_description/urdf/yumi_servo_gripper.urdf"
         )
 
-        self.grip_tcp_frame = self._server.scene.add_transform_controls("/grip_tcp_frame", position=onp.array([0,0,self.tcp_offset]), scale=0.05, line_width= 4.5, disable_sliders=True, disable_axes=True, depth_test=False) #, rotation_limits=((-1000.0, 1000.0), (0.0, 0.0), (0.0, 0.0)))
+        self.grip_tcp_frame = self._server.scene.add_transform_controls("/grip_tcp_frame", position=onp.array([0,0,self.tcp_offset]), scale=0.05, line_width= 4.5, disable_sliders=True, disable_axes=False, depth_test=False) #, rotation_limits=((-1000.0, 1000.0), (0.0, 0.0), (0.0, 0.0)))
         self.grip_base_frame = self._server.scene.add_frame("/grip_tcp_frame/grip_base_frame", position=onp.array([0,0,-self.tcp_offset]), visible=True, show_axes=False)
 
         viser_urdf = viser.extras.ViserUrdf(self._server, self.gripper_urdf, root_node_name="/grip_tcp_frame/grip_base_frame/yumi_gripper")

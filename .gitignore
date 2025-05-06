@@ -162,3 +162,7 @@ cython_debug/
 
 data/*
 env_snapshot/*
+
+fig_run_tracker.py
+
+*/devel/*

@@ -115,9 +115,12 @@ class GraspableObject:
         for li in range(num_groups):
             for ri in range(num_groups):
                 if li == ri:
+                    if num_groups == 1: # Handle single object case
+                        assignments.append((li, ri, 0))
                     continue
                 dist = mat_left[:, li].sum() + mat_right[:, ri].sum()
                 assignments.append((li, ri, dist))
+
         assignments.sort(key=lambda x: x[2])
         return [(a[0], a[1]) for a in assignments]
     
